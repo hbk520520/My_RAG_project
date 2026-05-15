@@ -1,4 +1,4 @@
 # My_RAG_project
-make processing advance in RAG project for complex law-question.
-First,I only want to make a small rag project that just a toy.
-Then,i don't think the first law project can make sense,so i make the rag plus.
+本来只是想要做一个最基础的RAG项目的，但是发现这不适配于复杂的法律项目，用后面提到的benchmark做评分蛮低的，于是我想做一个RAG_plus
+1.dataset
+本来想要用
