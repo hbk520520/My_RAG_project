@@ -1,0 +1,15 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+
+# 复制所有业务代码和基础设施
+COPY legal_graph_engine.py .
+COPY agentic_operators.py .
+COPY infrastructure/ infrastructure/
+
+# 启动脚本（通过环境变量控制运行哪个 Worker）
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]

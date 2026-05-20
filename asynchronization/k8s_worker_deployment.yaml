@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retriever-worker
+spec:
+  replicas: 10          # 非对称扩缩：Retriever 只需 10 个 Pod
+  selector:
+    matchLabels:
+      app: retriever
+  template:
+    metadata:
+      labels:
+        app: retriever
+    spec:
+      containers:
+      - name: retriever
+        image: your-registry/legal-agent-worker:latest
+        env:
+        - name: WORKER_TYPE
+          value: "retriever"
+        - name: REDIS_URL
+          value: "redis://redis-service:6379"
+        - name: KAFKA_BOOTSTRAP
+          value: "kafka-service:9092"
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2Gi
+          limits:
+            cpu: 2
+            memory: 8Gi

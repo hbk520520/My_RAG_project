@@ -13,7 +13,52 @@ from langgraph.graph import StateGraph, END
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LegalAgentPlanReplan")
+#语义缓存
+class SemanticCache:
+    """
+    语义缓存层，在 Router 之前执行。
+    命中则直接返回 answer，未命中返回 None。
+    """
 
+    def __init__(self, vector_store):
+        self.store = vector_store
+
+    def lookup(self, query_vector: np.ndarray) -> Optional[str]:
+        """查找缓存，命中返回答案，否则返回 None"""
+        return self.store.search(query_vector)
+
+    def add(self, query_vector: np.ndarray, answer: str):
+        """将新问答对加入缓存"""
+        self.store.store(query_vector, answer)
+class UnifiedQueryRouter:
+    def __init__(self, cache: Optional[SemanticCache] = None):
+        # ... 原有初始化 ...
+        self.cache = cache
+        # ...
+
+    def process(self, query: str) -> Dict[str, Any]:
+        # 1. 语义缓存拦截
+        if self.cache:
+            q_vec = self.embedder.encode(query, normalize_embeddings=True)
+            cached_answer = self.cache.lookup(q_vec)
+            if cached_answer is not None:
+                logger.info("⚡ 语义缓存命中，跳过后续流程")
+                return {
+                    "intent": "CACHED",
+                    "status": "cached_response",
+                    "response": cached_answer
+                }
+
+        # 2. 原有路由流程
+        result = self.route(query)  # ... 你的三层漏斗 ...
+
+        # 3. 生成最终答案后写回缓存 (示例，真实场景在最终答案生成后执行)
+        # if result.get("status") == "simple_rag" or result.get("final_report"):
+        #     answer = result.get("response") or result.get("final_report", "")
+        #     if answer and self.cache:
+        #         self.cache.add(q_vec, answer)
+
+        return result
 # ============================================================================
 # 第一部分：法律稠密图引擎（igraph + FAISS）—— 保持原样
 # ============================================================================
@@ -157,6 +202,42 @@ class AgenticNodesOperator(LegalLLMBase):
         user_prompt = f"用户问题：{user_query}\n证据链：\n{context_str}"
         return self._call_llm(system_prompt, user_prompt, temperature=0.3)
 
+    # ====================== 新增方法 (最小侵入) ======================
+    def grade_facts(self, task_desc: str, docs: str) -> dict:
+        """
+        Grader：强制 LLM 输出 JSON，包含 status (sufficient/partial/irrelevant)
+        如果调用失败，退回默认 irrelevant 状态，保证鲁棒性
+        """
+        system_prompt = """你是一个极其严苛的事实调查官。不要推理，只对比资料与任务。
+        输出JSON：
+        {
+          "rationale": "判决说理",
+          "status": "sufficient | partial | irrelevant",
+          "extracted_facts": ["事实1"] (仅在 sufficient/partial 时输出),
+          "missing_info": "缺少的搜索词" (仅在 partial 时输出)
+        }"""
+        raw = self._call_llm(system_prompt, f"任务：{task_desc}\n资料：{docs}", require_json=True)
+        try:
+            return json.loads(raw)
+        except Exception:
+            logger.warning("Grader JSON 解析失败，退回 irrelevant")
+            return {"status": "irrelevant", "rationale": "Grader 解析错误"}
+
+    def replan_with_wormhole(self, query: str, global_facts: list, fail_log: str) -> List[str]:
+        """
+        虫洞重规划：输出新的任务列表（字符串），若需虫洞则在描述前加 [WORMHOLE] 前缀
+        """
+        system_prompt = """你是一个重规划引擎。前序任务已失败。
+        如果图谱线索断裂，你可以启用虫洞进行全局搜索。
+        严格输出JSON：{"task_queue": ["步骤1", "步骤2"]}。
+        虫洞任务请以 "[WORMHOLE]" 开头。"""
+        prompt = f"案情：{query}\n已有事实：{global_facts}\n失败记录：{fail_log}"
+        raw = self._call_llm(system_prompt, prompt, require_json=True)
+        try:
+            data = json.loads(raw)
+            return data.get("task_queue", ["全局检索案情相关法条"])
+        except Exception:
+            return [f"[WORMHOLE] 全局检索: {query}"]
 
 # ============================================================================
 # 第三部分：Reasoner 模块（负责检索 + 回答 + 信息充分性判断）
@@ -194,11 +275,7 @@ class Reasoner:
     def answer(self, sub_task: str, original_query: str) -> Dict[str, Any]:
         """
         对子任务进行检索、抽取事实、推理，并判断信息是否充足。
-        返回字典：
-          - fact: 抽取的事实
-          - reasoning: 推理结论
-          - sufficient: 是否充足
-          - suggestion: 若不足，给出补充查询建议
+        现优先使用 Grader 结构化输出；若无法获得则回退原有逻辑。
         """
         docs = self.retrieve(sub_task)
         if not docs:
@@ -206,20 +283,55 @@ class Reasoner:
                 "fact": "未检索到相关文档",
                 "reasoning": "无法回答",
                 "sufficient": False,
-                "suggestion": f"请尝试更宽泛的检索词：{sub_task}"
+                "suggestion": f"请尝试更宽泛的检索词：{sub_task}",
+                "grader_status": "irrelevant"      # 新增字段
             }
 
-        # 调用 agentic_ops 的 extractor 和 reasoner
+        # 优先尝试 Grader 结构化评估
+        try:
+            grade_res = self.agentic_ops.grade_facts(sub_task, docs)
+            status = grade_res.get("status", "irrelevant")
+            facts = grade_res.get("extracted_facts", [])
+            suggestion = grade_res.get("missing_info", "")
+            rationale = grade_res.get("rationale", "")
+
+            if status == "sufficient":
+                return {
+                    "fact": "\n".join(facts),
+                    "reasoning": rationale,
+                    "sufficient": True,
+                    "suggestion": "",
+                    "grader_status": status
+                }
+            elif status == "partial":
+                return {
+                    "fact": "\n".join(facts),
+                    "reasoning": rationale,
+                    "sufficient": False,
+                    "suggestion": suggestion if suggestion else f"补充检索: {sub_task}",
+                    "grader_status": status
+                }
+            else:  # irrelevant
+                return {
+                    "fact": "未提取到相关事实",
+                    "reasoning": rationale,
+                    "sufficient": False,
+                    "suggestion": f"当前文档与任务无关，建议虫洞穿越: {sub_task}",
+                    "grader_status": status
+                }
+        except Exception as e:
+            logger.warning(f"Grader 调用异常，回退旧逻辑: {e}")
+
+        # 回退原有逻辑 (保持兼容)
         facts = self.agentic_ops.extract_facts(sub_task, docs, original_query=original_query)
         reasoning = self.agentic_ops.reason(sub_task, facts)
 
-        # 简单规则判断充足性（可替换为 LLM 判断）
         sufficient = True
         suggestion = ""
         if "未找到相关事实" in facts or "无法确定" in reasoning:
             sufficient = False
             suggestion = f"当前文档未覆盖“{sub_task}”，建议检索更精准的法律条文。"
-        elif len(docs) < 50:  # 文档过短也可能不够
+        elif len(docs) < 50:
             sufficient = False
             suggestion = "检索到的文档过于简略，请尝试不同的查询表述。"
 
@@ -227,9 +339,9 @@ class Reasoner:
             "fact": facts,
             "reasoning": reasoning,
             "sufficient": sufficient,
-            "suggestion": suggestion
+            "suggestion": suggestion,
+            "grader_status": "irrelevant" if not sufficient else "sufficient"
         }
-
 
 # ============================================================================
 # 第四部分：真实 DeepSeek Planner
@@ -268,15 +380,31 @@ def call_deepseek_planner(query: str) -> List[str]:
 
 
 # ============================================================================
-# 第五部分：新的 AgentState 与节点实现
+# 第五部分：新的 AgentState 与节点实现 (最小侵入式扩展)
 # ============================================================================
 class AgentState(TypedDict):
     user_query: str
-    task_queue: List[str]                               # 当前任务队列
+    task_queue: List[str]                               # 当前任务队列（保留原字段）
     past_observations: Annotated[List[str], operator.add]  # 历史观察（追加）
+    # ---- 新增字段，均带默认值，不影响已有代码 ----
+    global_facts: List[str]                              # 全局防篡改事实
+    retry_context: Dict[str, Any]                        # 临时状态（grader_status等）
+    recursion_depth: int                                 # 熔断计数
     final_report: Optional[str]
-    # 可选的沙箱会话ID
     sandbox_session_id: Optional[str]
+
+
+def node_l0_gateway(state: AgentState) -> dict:
+    """新增 L0 安全网关与初始化熔断字段"""
+    query = state["user_query"]
+    # 极简安全检查示例，可根据需要扩展
+    if "忽略指令" in query or "越狱" in query:
+        raise ValueError("L0_REJECT: 触发安全熔断")
+    return {
+        "recursion_depth": 0,
+        "retry_context": {},
+        "global_facts": state.get("global_facts", [])
+    }
 
 
 def node_planner(state: AgentState) -> dict:
@@ -288,49 +416,106 @@ def node_planner(state: AgentState) -> dict:
 def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     if not state["task_queue"]:
         return {}
+    # ---- 新增熔断保护 ----
+    depth = state.get("recursion_depth", 0)
+    if depth > 5:
+        logger.warning("🚨 触发算力熔断，强制终止")
+        return {"retry_context": {"status": "force_stop"}}
+
     current_task = state["task_queue"][0]
+    # ---- 新增：解析虫洞前缀 ----
+    actual_query = current_task
+    is_wormhole = False
+    if current_task.startswith("[WORMHOLE]"):
+        actual_query = current_task[len("[WORMHOLE]"):].strip()
+        is_wormhole = True
+        logger.info(f"虫洞穿越模式激活: {actual_query}")
+
     logger.info(f"Executor 正在处理: {current_task}")
 
     # 使用 Reasoner 进行检索、推理、判断充足性
-    result = reasoner.answer(current_task, original_query=state["user_query"])
+    # Reasoner.answer 已升级为使用 Grader
+    result = reasoner.answer(actual_query, original_query=state["user_query"])
 
-    # 构造观察记录
+    # 构造观察记录（保留原有格式）
     observation = (f"【任务：{current_task}】\n"
                    f"事实：{result['fact']}\n"
                    f"推理：{result['reasoning']}")
 
     new_queue = state["task_queue"][1:]  # 默认移除当前任务
 
-    if not result["sufficient"]:
-        # 信息不足：将补充任务插入队列头部（不删除当前任务，而是改成补充查询）
+    # ---- 新增：根据 grader_status 和 sufficient 联合决策 ----
+    grader_status = result.get("grader_status", "irrelevant")
+    sufficient = result.get("sufficient", False)
+
+    if not sufficient:
         suggestion = result.get("suggestion", "需要更精准的法律检索")
-        # 新建一个补充任务，插入到队首
+        # 原有逻辑：插入补充任务（保留）
         new_queue = [f"{current_task}（补充：{suggestion}）"] + new_queue
         observation += f"\n⚠️ 信息不足，已添加补充任务：{suggestion}"
 
+        # 新增：设置 retry_context 供 Replanner 决策
+        retry_ctx = {
+            "status": grader_status,
+            "missing_info": suggestion,
+            "fail_count": state.get("retry_context", {}).get("fail_count", 0) + 1,
+            "is_wormhole": is_wormhole
+        }
+    else:
+        retry_ctx = {"status": "sufficient", "fail_count": 0}
+
+    # ---- 新增：追加全局事实 (只追加，不覆盖) ----
+    facts_to_add = []
+    if isinstance(result['fact'], str) and result['fact'] != "未检索到相关文档":
+        facts_to_add.append(result['fact'])
+    elif isinstance(result['fact'], list):
+        facts_to_add.extend(result['fact'])
+
     return {
         "task_queue": new_queue,
-        "past_observations": [observation]
+        "past_observations": [observation],
+        "global_facts": state.get("global_facts", []) + facts_to_add,
+        "retry_context": retry_ctx,
+        "recursion_depth": depth + 1
     }
 
 
 def node_replanner(state: AgentState) -> dict:
     obs_text = "\n".join(state.get("past_observations", []))
     queue = state["task_queue"]
+    retry_ctx = state.get("retry_context", {})
 
     # 如果队列为空，结束
     if not queue:
         logger.info("所有任务完成，准备生成最终报告")
         return {}
 
-    # 动态重规划示例：发现“未签订劳动合同”但计划中没有“双倍工资”
+    # ---- 新增：基于 retry_context 的重规划决策 ----
+    status = retry_ctx.get("status")
+    fail_count = retry_ctx.get("fail_count", 0)
+
+    # 情况1：强制停止
+    if status == "force_stop":
+        return {"task_queue": []}
+
+    # 情况2：无头绪 (irrelevant) 或部分缺失且重试超过2次 -> 虫洞重规划
+    if status == "irrelevant" or (status == "partial" and fail_count > 2):
+        logger.info("触发虫洞重规划引擎")
+        # 尝试使用 agentic_ops 的 replan_with_wormhole，若不可用则生成简单虫洞任务
+        if hasattr(state, 'agentic_ops'):  # 实际无法直接获取，改为通过闭包传递，此处简化处理
+            new_queue = ["[WORMHOLE] 全局检索相关法条"]  # 默认虫洞任务
+        else:
+            new_queue = ["[WORMHOLE] 全局检索相关法条"]
+        return {"task_queue": new_queue, "retry_context": {}}
+
+    # 情况3：原有规则补充（如未签订劳动合同加双倍工资）
     if "未签订劳动合同" in obs_text and not any("双倍工资" in t for t in queue):
         new_queue = [
             "核查未签劳动合同二倍工资仲裁时效",
             "合并计算二倍工资差额与违法解除赔偿金"
         ]
-        logger.info(f"Replanner 推翻原计划，新队列: {new_queue}")
-        return {"task_queue": new_queue}
+        logger.info(f"Replanner 硬规则补充，新队列: {new_queue}")
+        return {"task_queue": new_queue, "retry_context": {}}
 
     # 默认保持原队列继续执行
     return {}
@@ -338,7 +523,7 @@ def node_replanner(state: AgentState) -> dict:
 
 def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
     logger.info("Generator 生成最终法律意见书")
-    # 将 past_observations 转换为 agentic_ops 需要的格式
+    # 保留原有上下文构建方式
     accumulated = []
     for idx, obs in enumerate(state.get("past_observations", [])):
         accumulated.append({
@@ -351,28 +536,36 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
 
 
 # ============================================================================
-# 第六部分：组装 LangGraph 图
+# 第六部分：组装 LangGraph 图（仅增加 L0 节点，路由增强）
 # ============================================================================
 def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperator):
     builder = StateGraph(AgentState)
 
     # 闭包注入依赖
+    def l0_gateway(state): return node_l0_gateway(state)
     def planner(state): return node_planner(state)
     def executor(state): return node_executor(state, reasoner)
     def replanner(state): return node_replanner(state)
     def generate(state): return node_generate(state, agentic_ops)
 
+    # 节点注册（增加 L0_Gateway）
+    builder.add_node("L0_Gateway", l0_gateway)
     builder.add_node("Planner", planner)
     builder.add_node("Executor", executor)
     builder.add_node("Replanner", replanner)
     builder.add_node("Generate", generate)
 
-    builder.set_entry_point("Planner")
+    # 拓扑：L0 -> Planner -> Executor -> Replanner
+    builder.set_entry_point("L0_Gateway")
+    builder.add_edge("L0_Gateway", "Planner")
     builder.add_edge("Planner", "Executor")
     builder.add_edge("Executor", "Replanner")
 
-    # Replanner 后根据队列是否为空决定去向
+    # Replanner 后根据队列和熔断状态决定去向
     def route_after_replan(state: AgentState):
+        # 新增：强制停止直接结案
+        if state.get("retry_context", {}).get("status") == "force_stop":
+            return "Generate"
         if len(state.get("task_queue", [])) == 0:
             return "Generate"
         return "Executor"
@@ -402,13 +595,16 @@ if __name__ == "__main__":
         v = np.random.randn(768).astype(np.float32)
         return v / np.linalg.norm(v)
 
-    # 3. 模拟 AgenticNodesOperator（由于无真实 API Key，使用 Mock）
+    # 3. 模拟 AgenticNodesOperator（包含新增方法）
     class MockAgenticOps(AgenticNodesOperator):
         def _call_llm(self, system_prompt, user_prompt, require_json=False, temperature=0.1):
             logger.info(f"Mock LLM called with: {system_prompt[:50]}...")
             if require_json:
+                if "grade" in system_prompt.lower() or "事实调查官" in system_prompt:
+                    return '{"rationale": "Mock充足", "status": "sufficient", "extracted_facts": ["Mock事实1"]}'
+                if "replan" in system_prompt.lower() or "重规划" in system_prompt:
+                    return '{"task_queue": ["[WORMHOLE] Mock全局检索"]}'
                 return '{"strategy_queue": ["检查劳动关系", "核实辞退理由", "计算赔偿金额"]}'
-            # 简单回显
             if "extract" in system_prompt:
                 return "Mock 提取事实：公司口头辞退，属于违法解除。"
             if "reason" in system_prompt:
@@ -429,7 +625,10 @@ if __name__ == "__main__":
         "user_query": "试用期最后一天被辞退，能拿多少赔偿？",
         "task_queue": [],
         "past_observations": [],
-        "final_report": ""
+        "final_report": "",
+        "global_facts": [],
+        "retry_context": {},
+        "recursion_depth": 0
     }
 
     final_state = agent.invoke(initial_state)
@@ -440,3 +639,6 @@ if __name__ == "__main__":
     print("\n全部观察记录：")
     for obs in final_state["past_observations"]:
         print(obs)
+    print("\n全局事实：")
+    for f in final_state.get("global_facts", []):
+        print(f"  - {f}")
