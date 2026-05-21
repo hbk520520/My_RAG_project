@@ -23,7 +23,9 @@ logger = logging.getLogger("PlannerWorker")
 
 
 def call_planner_llm(user_query: str) -> list:
-    """调用 Meta-Planner LLM 生成任务队列"""
+    """
+    调用 Meta-Planner LLM 生成双层蓝图 P_q={S_q,C_q}，展平为可执行任务队列。
+    """
     from openai import OpenAI
 
     client = OpenAI(
@@ -31,16 +33,28 @@ def call_planner_llm(user_query: str) -> list:
         base_url=cfg.get("llm", "base_url")
     )
 
-    system_prompt = """你是一个顶级的中国法律案件拆解专家与智能体规划中枢。
-【核心任务】：不要尝试回答用户的法律问题！你的唯一任务是将用户的案情描述，拆解为按顺序执行的原子查询与计算步骤。
+    system_prompt = """你是一个顶级的中国法律案件拆解专家。
+【核心任务】：不要回答法律问题！将用户案情拆解为「双层蓝图」。
 
-【拆解原则】：
-1. 步步为营：先查明事实前提，再核定法律性质，最后核算具体数额。
-2. 原子化：每一步只能包含一个具体的查询动作。
-
-【严格输出格式】：
-你必须输出合法的 JSON 格式，包含且仅包含一个 `task_queue` 字段，其值为字符串数组。
-示例：{"task_queue": ["核实劳动者的入职时间、离职时间与平均工资", "审查公司单方面解除劳动合同的法定事由及通知程序", "核算违法解除劳动合同的 2N 赔偿金"]}
+【输出格式 (严格 JSON)】：
+{
+  "skeleton": {
+    "nodes": [
+      {"id": "1", "abstract": "核实劳动关系", "deps": []},
+      {"id": "2", "abstract": "核查解除合法性", "deps": ["1"]},
+      {"id": "3", "abstract": "计算赔偿金额", "deps": ["2"]}
+    ]
+  },
+  "concretion": {
+    "concretions": {
+      "1": "具体查询(含实体名)",
+      "2": "具体查询(含实体名)",
+      "3": "具体查询(含实体名)"
+    }
+  }
+}
+【abstract 规则】：不包含具体人名/公司名/日期，用通用概念描述。
+【deps 规则】：若步骤B依赖A的结果，在B的deps中写A的id。无依赖填[]。
 """
     try:
         response = client.chat.completions.create(
@@ -54,11 +68,20 @@ def call_planner_llm(user_query: str) -> list:
             max_tokens=cfg.get("llm", "max_tokens_default")
         )
         raw = response.choices[0].message.content
-        parsed = json.loads(raw)
-        return parsed.get("task_queue", ["查核基础法律事实"])
+        data = json.loads(raw)
+
+        # 解析双层蓝图 → 展平
+        import sys as _sys, os as _os
+        _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", ".."))
+        from double_layer_plan import parse_double_layer_plan
+        plan = parse_double_layer_plan(data)
+        flat = plan.to_flat_task_queue(respect_deps=True)
+        logger.info(f"双层蓝图: {len(plan.skeleton.nodes)}节点 DAG → {len(flat)}步拓扑队列")
+        return flat
+
     except Exception as e:
         logger.error(f"Planner LLM 调用失败: {e}")
-        return ["兜底步骤：核查劳动关系基础事实"]
+        return [{"task_desc": "核查劳动关系基础事实", "engine": "GRAPH_TRAVERSAL", "rationale": "异常降级"}]
 
 
 def main():

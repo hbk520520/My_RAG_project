@@ -188,17 +188,40 @@ class ExecutionPlan(BaseModel):
 class AgenticNodesOperator(LegalLLMBase):
     """封装 Extractor/Reasoner/Generator 的 Prompt 逻辑"""
 
-    def generate_plan(self, user_query: str) -> List[str]:
-        system_prompt = """你是顶级法律案件拆解专家（Meta-Planner）。面对用户的复杂法律问题，只生成解决步骤的抽象列表，不要回答。严格输出JSON: {"strategy_queue": ["步骤1", "步骤2", ...]}"""
+    def generate_plan(self, user_query: str) -> list:
+        """
+        生成双层蓝图 P_q = {S_q, C_q}，返回展平后的可执行任务队列。
+        兼容旧格式：若 LLM 仍返回扁平列表，自动转换。
+        """
+        system_prompt = """你是顶级法律案件拆解专家（Meta-Planner）。面对复杂法律问题，生成双层蓝图（抽象DAG + 具象化映射）。严格输出JSON: {"skeleton":{"nodes":[{"id":"1","abstract":"...","deps":[]}]},"concretion":{"concretions":{"1":"..."}}}"""
         user_prompt = f"用户问题：{user_query}"
         raw = self._call_llm(system_prompt, user_prompt, require_json=True)
         try:
             data = json.loads(raw)
-            plan = ExecutionPlan(**data)
-            return plan.strategy_queue
-        except (json.JSONDecodeError, ValidationError) as e:
-            logger.error(f"Meta-Planner输出解析失败: {e}\n原始内容: {raw}")
-            return [user_query]
+            # 尝试解析双层蓝图
+            import sys, os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+            from double_layer_plan import parse_double_layer_plan
+            plan = parse_double_layer_plan(data)
+            flat_queue = plan.to_flat_task_queue(respect_deps=True)
+            logger.info(f"双层蓝图解析成功: {len(plan.skeleton.nodes)} 节点, 拓扑序展开")
+            return flat_queue
+        except Exception as e:
+            logger.warning(f"双层蓝图解析失败 ({e}), 尝试旧格式")
+            try:
+                # 兼容旧扁平格式
+                data = json.loads(raw)
+                if "task_queue" in data:
+                    from double_layer_plan import parse_double_layer_plan
+                    plan = parse_double_layer_plan(data)
+                    return plan.to_flat_task_queue(respect_deps=True)
+                if "strategy_queue" in data:
+                    return [{"task_desc": t, "engine": "GRAPH_TRAVERSAL", "rationale": ""}
+                            for t in data["strategy_queue"]]
+            except Exception:
+                pass
+            logger.error(f"Meta-Planner 输出完全无法解析: {raw[:200]}")
+            return [{"task_desc": user_query, "engine": "GRAPH_TRAVERSAL", "rationale": "兜底"}]
 
     def extract_facts(self, current_sub_task: str, raw_retrieved_docs: str,
                       original_query: Optional[str] = None) -> str:
@@ -428,18 +451,35 @@ class Reasoner:
 DEEPSEEK_API_KEY = "sk-your-real-api-key"   # 替换为你的 Key
 deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
 
-def call_deepseek_planner(query: str) -> List[str]:
-    system_prompt = """你是一个顶级的中国法律案件拆解专家与智能体规划中枢。
-    【核心任务】：不要尝试回答用户的法律问题！你的唯一任务是将用户的案情描述，拆解为按顺序执行的原子查询与计算步骤。
-    
-    【拆解原则】：
-    1. 步步为营：先查明事实前提，再核定法律性质，最后核算具体数额。
-    2. 原子化：每一步只能包含一个具体的查询动作。
-    
-    【严格输出格式】：
-    你必须输出合法的 JSON 格式，包含且仅包含一个 `task_queue` 字段，其值为字符串数组。
-    示例：{"task_queue": ["核实劳动者的入职时间、离职时间与平均工资", "审查公司单方面解除劳动合同的法定事由及通知程序", "核算违法解除劳动合同的 2N 赔偿金"]}
+def call_deepseek_planner(query: str) -> list:
     """
+    调用 DeepSeek 生成双层蓝图并展平为可执行队列。
+    返回 List[Dict] (task_desc + engine + rationale 格式)
+    """
+    system_prompt = """你是一个顶级的中国法律案件拆解专家与智能体规划中枢。
+【核心任务】：不要回答法律问题！将用户案情拆解为「双层蓝图」。
+
+【双层蓝图输出格式 (严格 JSON)】：
+{
+  "skeleton": {
+    "nodes": [
+      {"id": "1", "abstract": "核实劳动关系", "deps": []},
+      {"id": "2", "abstract": "核查解除合法性", "deps": ["1"]},
+      {"id": "3", "abstract": "计算赔偿金额", "deps": ["2"]}
+    ]
+  },
+  "concretion": {
+    "concretions": {
+      "1": "核实张三自2022年3月与A公司的劳动关系",
+      "2": "核查A公司口头辞退是否违反劳动法第39条",
+      "3": "按工作年限2年、月薪8000计算2N赔偿金"
+    }
+  }
+}
+
+【deps 规则】：若步骤B依赖步骤A的结果，在B的deps中填入A的id。无依赖填[]。
+【abstract 规则】：不包含具体人名/公司名/日期，用通用概念描述。
+"""
     try:
         response = deepseek_client.chat.completions.create(
             model="deepseek-chat",
@@ -451,11 +491,20 @@ def call_deepseek_planner(query: str) -> List[str]:
             temperature=0.1
         )
         raw = response.choices[0].message.content
-        parsed = json.loads(raw)
-        return parsed.get("task_queue", ["查核基础法律事实"])
+        data = json.loads(raw)
+
+        # 解析双层蓝图 → 展平为执行队列
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from double_layer_plan import parse_double_layer_plan
+        plan = parse_double_layer_plan(data)
+        flat = plan.to_flat_task_queue(respect_deps=True)
+        logger.info(f"双层蓝图: {len(plan.skeleton.nodes)} 节点 DAG → {len(flat)} 步拓扑队列")
+        return flat
+
     except Exception as e:
         logger.error(f"DeepSeek Planner 调用失败: {e}")
-        return ["兜底步骤：人工审查案件材料"]
+        return [{"task_desc": "查核基础法律事实", "engine": "GRAPH_TRAVERSAL", "rationale": "兜底"}]
 
 
 # ============================================================================
@@ -479,11 +528,25 @@ class AgentState(TypedDict):
 
 
 def node_l0_gateway(state: AgentState) -> dict:
-    """新增 L0 安全网关与初始化熔断字段"""
+    """L0 安全网关：Prompt 注入检测 + 初始化熔断字段"""
     query = state["user_query"]
-    # 极简安全检查示例，可根据需要扩展
-    if "忽略指令" in query or "越狱" in query:
-        raise ValueError("L0_REJECT: 触发安全熔断")
+
+    # ---- 安全检测规则 ----
+    # 中文 jailbreak
+    injection_cn = ["忽略指令", "越狱", "忽略之前的", "忘记所有规则",
+                    "假装你是", "你现在是", "DAN", "开发者模式"]
+    # 英文 jailbreak
+    injection_en = ["ignore previous instructions", "ignore all rules",
+                    "system prompt", "pretend you are", "jailbreak",
+                    "developer mode", "you are now"]
+    # 分隔符注入
+    injection_delimiters = ['"""', "---", "===", "[[SYSTEM]]", "<<SYS>>"]
+
+    for pattern in injection_cn + injection_en + injection_delimiters:
+        if pattern.lower() in query.lower():
+            logger.warning(f"L0_REJECT: 检测到注入模式 '{pattern}'")
+            raise ValueError(f"L0_REJECT: 触发安全熔断 - 检测到注入模式")
+
     return {
         "recursion_depth": 0,
         "retry_context": {},
@@ -602,7 +665,6 @@ def node_replanner(state: AgentState) -> dict:
     if status == "irrelevant" or (status == "partial" and fail_count > 2):
         logger.info("触发虫洞重规划引擎 (LLM)")
 
-        # ---- 关键修复：只重规划当前失败的子任务，而非整个问题 ----
         current_failed = queue[0]
         failed_desc = (
             current_failed.get("task_desc", "")
@@ -616,6 +678,7 @@ def node_replanner(state: AgentState) -> dict:
 可用引擎：GRAPH_TRAVERSAL (图游走) / GLOBAL_DENSE_WORMHOLE (虫洞穿越)。
 严格输出JSON：{{"task_queue":[{{"task_desc":"...","engine":"GRAPH_TRAVERSAL","rationale":"..."}}]}}"""
         try:
+            # 使用模块级 deepseek_client（兼容 soul.py 独立运行时无 agentic_ops 的场景）
             resp = deepseek_client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
@@ -623,8 +686,7 @@ def node_replanner(state: AgentState) -> dict:
                     {"role": "user", "content": f"失败子任务：{replan_target}\n已有全局事实：{state.get('global_facts',[])}\n原始问题（参考）：{state['user_query'][:100]}"}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0.4,
-                max_tokens=2048
+                temperature=0.4, max_tokens=2048
             )
             data = json.loads(resp.choices[0].message.content)
             new_tasks = []

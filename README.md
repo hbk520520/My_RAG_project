@@ -12,7 +12,7 @@
 ├── observability.py               # 🆕 可观测性 (Metrics/健康检查/DLQ/指数退避)
 ├── query.py                       # 路由层: UnifiedQueryRouter_Query (三层漏斗)
 ├── benchmark.py                   # 评测层: 检索/轨迹/Graph-NIAH
-├── replanner_rules_report.py      # 🆕 Replanner 规则扩展报告
+├── double_layer_plan.py           # 🆕 双层蓝图 Schema (S_q DAG + C_q 具象化)
 ├── training_data_guide.py         # 🆕 训练数据工程化建议
 │
 ├── dataset/                       # 知识图谱层
