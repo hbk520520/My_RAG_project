@@ -3,7 +3,88 @@
 > 从基础 RAG 演进为 Plan-and-Replan 法律智能体系统
 
 ## 项目结构
-本来只是想要做一个最基础的RAG项目的，但是发现这不适配于复杂的法律项目，用后面提到的benchmark做评分蛮低的，于是我想做一个RAG_plus
+
+```
+.
+├── config.yaml                    # 🆕 统一配置中心
+├── config_loader.py               # 🆕 配置加载器 (${ENV_VAR} 替换)
+├── prompts.py                     # 🆕 Prompt 模板库 (11种场景)
+├── observability.py               # 🆕 可观测性 (Metrics/健康检查/DLQ/指数退避)
+├── query.py                       # 路由层: UnifiedQueryRouter_Query (三层漏斗)
+├── benchmark.py                   # 评测层: 检索/轨迹/Graph-NIAH
+├── replanner_rules_report.py      # 🆕 Replanner 规则扩展报告
+├── training_data_guide.py         # 🆕 训练数据工程化建议
+│
+├── dataset/                       # 知识图谱层
+│   ├── chunk.py                   # PDF 提取 + 语义分块
+│   ├── graph.py                   # 核心图引擎 (BGE-M3 + FAISS-HNSW + LoRA)
+│   ├── IncrementalMemoryManager.py # GMM 动态阈值增量记忆
+│   ├── memory_graph_bridge.py     # 🆕 桥接: GMM记忆 ↔ igraph图引擎
+│   └── prepare_corpus.py          # 批量向量化注入
+│
+├── asynchronization/              # 异步编排层 (Kafka + Redis)
+│   ├── kafka_utils.py             # Kafka Producer/Consumer (5个Topic)
+│   ├── state_manager.py           # Redis 状态脱水/复水
+│   ├── Dockerfile.worker          # 统一 Worker 镜像
+│   ├── entrypoint.sh              # 按 WORKER_TYPE 分发
+│   ├── k8s_worker_deployment.yaml # K8s 部署配置
+│   └── workers/
+│       ├── planer-worker.py       # Meta-Planner Worker
+│       ├── retriever_worker.py    # 图检索 Worker
+│       ├── grader_worker.py       # 🆕 Grader Worker
+│       ├── replanner_worker.py    # 🆕 Replanner Worker (v2 Pydantic)
+│       └── reasoner_worker.py     # 🆕 Reasoner Worker
+│
+├── multiple-search/               # 多智能体推理层
+│   ├── soul.py                    # LangGraph 主控 (含沙箱闭环)
+│   ├── SemanticCache/
+│   │   └── engine.py              # 语义缓存 (InMemory + RedisVL)
+│   └── legal_sandbox/
+│       ├── Dockerfile             # 沙箱镜像
+│       ├── sandbox_server.py      # FastAPI 执行服务
+│       ├── sandbox_manager.py     # Docker 调度器
+│       └── example_usage.py       # 集成示例
+│
+└── model/                         # 训练层
+    ├── Unsloth.py                 # 4-bit QLoRA 加速训练
+    ├── path-from-ds.py            # Evol-Instruct 反向出题
+    ├── query-generated.py         # 高噪点口语化 Query 生成
+    └── train/
+        ├── Meta-planner.py        # SFT
+        ├── Repalnner.py           # GRPO
+        ├── Graderand Extractor.py # DPO
+        ├── Reasoner.py            # 长上下文 SFT
+        └── Retriever (BGE-M3).py  # LoRA + MNR Loss
+```
+
+## 数据流
+
+```
+用户 → SemanticCache → UnifiedQueryRouter_Query (L0→L1→L2)
+        ├─ CHITCHAT → 闲聊
+        ├─ SIMPLE_QA → 简单RAG
+        └─ COMPLEX_TASK → UnifiedQueryRouter_Soul
+                → LangGraph: L0_Gateway → Planner → Executor → Grader
+                → Replanner (失败→虫洞) → Generate → WriteCode → ExecuteCode(沙箱)
+```
+
+## 更新日志 (2026-05-21)
+
+| 类别 | 变更 |
+|---|---|
+| Worker | 新增 grader / replanner(v2 Pydantic) / reasoner Worker |
+| 路由 | query.py process() 连通 soul.py LangGraph Agent |
+| 配置 | config.yaml + config_loader.py 统一所有硬编码 |
+| 沙箱 | WriteCode → ExecuteCode → InjectResult → Cleanup 闭环 |
+| 图引擎 | load_lora_weights() 对齐检索器训练; memory_graph_bridge 双向同步 |
+| 可观测性 | 结构化日志 + Metrics + 健康检查 + DLQ + 指数退避 |
+| Prompt | prompts.py 统一 11 种模板 |
+| Replanner | v2: Pydantic Schema + engine选择(GRAPH_TRAVERSAL/GLOBAL_DENSE_WORMHOLE) + rationale 可回溯 |
+
+---
+
+## 原始设计笔记
+
 注意我们的项目是没有generate大模型的
 1.dataset
 （1）用knn进行冷启动，接下来计算新入库的数据与原粒度的加权和（余弦和BM25），>0.85（不然完全不相似），<0.99(不然几乎完全冗余)-->需要定时去查看是不是真的冗余，然后选取top去连边。
