@@ -1,28 +1,88 @@
+"""
+Planner Worker —— 消费 Planner 队列，调用 Meta-Planner 生成任务队列
+"""
 import sys
+import os
+import json
 import logging
-sys.path.append("../../")   # 确保能找到 legal_graph_engine
 
-from infrastructure.state_manager import StateManager
-from infrastructure.kafka_utils import (
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config_loader import cfg
+from state_manager import StateManager
+from kafka_utils import (
     create_consumer, create_producer,
     TOPIC_PLANNER_PENDING, TOPIC_RETRIEVER_PENDING
 )
-from agentic_operators import AgenticNodesOperator   # 你的 LLM 算子
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=getattr(logging, cfg.get("observability", "log_level", default="INFO")),
+    format='%(asctime)s - [%(levelname)s] - %(name)s - %(message)s'
+)
 logger = logging.getLogger("PlannerWorker")
 
-def main():
-    consumer = create_consumer(TOPIC_PLANNER_PENDING, "planner-group")
-    producer = create_producer()
-    state_manager = StateManager()
 
-    # 加载模型（只加载一次，全局复用）
-    agentic = AgenticNodesOperator(api_key="your-key")  # 只使用其 generate_plan
+def call_planner_llm(user_query: str) -> list:
+    """调用 Meta-Planner LLM 生成任务队列"""
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=cfg.get("llm", "api_key"),
+        base_url=cfg.get("llm", "base_url")
+    )
+
+    system_prompt = """你是一个顶级的中国法律案件拆解专家与智能体规划中枢。
+【核心任务】：不要尝试回答用户的法律问题！你的唯一任务是将用户的案情描述，拆解为按顺序执行的原子查询与计算步骤。
+
+【拆解原则】：
+1. 步步为营：先查明事实前提，再核定法律性质，最后核算具体数额。
+2. 原子化：每一步只能包含一个具体的查询动作。
+
+【严格输出格式】：
+你必须输出合法的 JSON 格式，包含且仅包含一个 `task_queue` 字段，其值为字符串数组。
+示例：{"task_queue": ["核实劳动者的入职时间、离职时间与平均工资", "审查公司单方面解除劳动合同的法定事由及通知程序", "核算违法解除劳动合同的 2N 赔偿金"]}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=cfg.get("llm", "judge_model"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"用户案情：{user_query}"}
+            ],
+            response_format={"type": "json_object"},
+            temperature=cfg.get("llm", "temperature_plan"),
+            max_tokens=cfg.get("llm", "max_tokens_default")
+        )
+        raw = response.choices[0].message.content
+        parsed = json.loads(raw)
+        return parsed.get("task_queue", ["查核基础法律事实"])
+    except Exception as e:
+        logger.error(f"Planner LLM 调用失败: {e}")
+        return ["兜底步骤：核查劳动关系基础事实"]
+
+
+def main():
+    consumer = create_consumer(
+        TOPIC_PLANNER_PENDING, "planner-group",
+        bootstrap_servers=cfg.get("kafka", "bootstrap_servers")
+    )
+    producer = create_producer(
+        bootstrap_servers=cfg.get("kafka", "bootstrap_servers")
+    )
+    state_manager = StateManager(
+        redis_url=cfg.get("redis", "url"),
+        expire_seconds=cfg.get("redis", "state_expire_seconds")
+    )
 
     logger.info("Planner Worker started, waiting for tasks...")
+
     for msg in consumer:
-        session_id = msg.key
+        session_id = msg.key or (msg.value.get("session_id") if isinstance(msg.value, dict) else None)
+        if not session_id:
+            logger.error("No session_id in message, skip")
+            consumer.commit()
+            continue
+
         try:
             state = state_manager.load_state(session_id)
         except KeyError:
@@ -31,20 +91,25 @@ def main():
             continue
 
         # 执行规划
-        plan = agentic.generate_plan(state["user_query"])
+        plan = call_planner_llm(state["user_query"])
         state["task_queue"] = plan
         state["current_step"] = "planner_done"
+        state["recursion_depth"] = 0
 
         # 脱水保存
         state_manager.save_state(session_id, state)
 
         # 发送给 Retriever
-        producer.send(TOPIC_RETRIEVER_PENDING, key=session_id, value={"session_id": session_id})
+        producer.send(TOPIC_RETRIEVER_PENDING, key=session_id,
+                      value={"session_id": session_id})
         producer.flush()
 
         # 手动提交位移
         consumer.commit()
-        logger.info(f"Session {session_id}: plan generated")
+        logger.info(f"Session {session_id}: plan generated ({len(plan)} tasks)")
+
+    consumer.close()
+
 
 if __name__ == "__main__":
     main()

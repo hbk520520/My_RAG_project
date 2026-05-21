@@ -186,7 +186,8 @@ class UnifiedQueryRouter_Query:
                 # 构建 Agent（使用 soul.py 内的图引擎和操作器）
                 graph_engine = SoulGraphBuilder(embedding_dim=768)
                 agentic_ops = AgenticNodesOperator(
-                    api_key=self.classifier  # 此处实际需要传 API key，生产环境从配置获取
+                    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+                    base_url="https://api.deepseek.com"
                 )
 
                 # 复用 router 自身的 embedder 作为检索编码器

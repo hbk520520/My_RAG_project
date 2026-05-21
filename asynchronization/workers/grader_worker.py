@@ -4,6 +4,7 @@ Grader Worker —— 评估检索结果的信息充分性
 """
 import sys
 import os
+import json
 import logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -59,9 +60,6 @@ def call_grader_llm(task_desc: str, docs: str) -> dict:
     except Exception as e:
         logger.error(f"Grader LLM 调用失败: {e}")
         return {"status": "irrelevant", "rationale": f"Grader 调用异常: {str(e)}"}
-
-
-import json
 
 
 def main():

@@ -601,33 +601,25 @@ def node_replanner(state: AgentState) -> dict:
     # 情况2：无头绪或部分缺失且重试超过阈值 -> LLM 虫洞重规划
     if status == "irrelevant" or (status == "partial" and fail_count > 2):
         logger.info("触发虫洞重规划引擎 (LLM)")
-        from openai import OpenAI
-        import os as _os
-        _sys_path = _os.path.join(_os.path.dirname(__file__), "..")
-        import sys as _sys
-        _sys.path.insert(0, _sys_path)
-        try:
-            from config_loader import cfg as _cfg
-            client = OpenAI(api_key=_cfg.get("llm", "api_key"), base_url=_cfg.get("llm", "base_url"))
-        except Exception:
-            client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY", ""), base_url="https://api.deepseek.com")
-
-        class _ReplanOps:
-            def __init__(self, c): self.client = c
-            def _call_llm(self, sp, up, require_json=False, temperature=0.4):
-                kw = {"model": "deepseek-chat", "messages": [{"role":"system","content":sp},{"role":"user","content":up}], "temperature": temperature, "max_tokens": 2048}
-                if require_json: kw["response_format"] = {"type":"json_object"}
-                return self.client.chat.completions.create(**kw).choices[0].message.content.strip()
-
-        ops = _ReplanOps(client)
 
         system_prompt = f"""你是一个经过强化学习训练的顶级重规划引擎。
 当前图谱检索已陷入死胡同。连续碰壁次数：{fail_count}。碰壁原因：{obs_text[-300:]}。
 可用引擎：GRAPH_TRAVERSAL (图游走) / GLOBAL_DENSE_WORMHOLE (虫洞穿越)。
 严格输出JSON：{{"task_queue":[{{"task_desc":"...","engine":"GRAPH_TRAVERSAL","rationale":"..."}}]}}"""
         try:
-            raw = ops._call_llm(system_prompt, f"案情：{state['user_query']}\n事实：{state.get('global_facts',[])}", require_json=True, temperature=0.4)
-            data = json.loads(raw)
+            raw = call_deepseek_planner.__wrapped__ if hasattr(call_deepseek_planner, '__wrapped__') else None
+            # 使用模块级 deepseek_client
+            resp = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"案情：{state['user_query']}\n事实：{state.get('global_facts',[])}"}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.4,
+                max_tokens=2048
+            )
+            data = json.loads(resp.choices[0].message.content)
             new_queue = []
             for t in data.get("task_queue", []):
                 new_queue.append({
@@ -637,8 +629,9 @@ def node_replanner(state: AgentState) -> dict:
                 })
             if not new_queue:
                 new_queue = [{"task_desc": "全局检索相关法条", "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "兜底"}]
-        except Exception:
-            new_queue = [{"task_desc": state["user_query"][:60], "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "异常降级"}]
+        except Exception as e:
+            logger.error(f"Replanner LLM 调用异常: {e}")
+            new_queue = [{"task_desc": state["user_query"][:60], "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": f"异常降级: {str(e)[:50]}"}]
     else:
         # 情况3：原有规则补充（兼容字符串和 Dict 格式）
         new_queue = list(queue)  # 保持原队列
