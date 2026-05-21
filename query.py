@@ -18,9 +18,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - 
 logger = logging.getLogger("UnifiedRouter")
 
 # ==========================================
-# 统一智能路由网关
+# 统一智能路由网关 (query.py 专用)
 # ==========================================
-class UnifiedQueryRouter:
+class UnifiedQueryRouter_Query:
     def __init__(self):
         logger.info("加载嵌入模型与语义分类器...")
         self.embedder = SentenceTransformer(BGE_MODEL_PATH, device='cuda')
@@ -176,10 +176,50 @@ class UnifiedQueryRouter:
         # 如果需要唤醒 Agent 图引擎，在这里根据 intent 进一步处理
         if result["intent"] == "COMPLEX_TASK":
             logger.info("⏳ 复杂意图，启动 Plan-and-Replan 智能体引擎...")
-            # initial_state = { "user_query": query, ... }
-            # final_state = legal_agent_engine.invoke(initial_state)
-            # result["agent_report"] = final_state.get("report")
-            result["status"] = "agent_execution"
+            try:
+                # 延迟导入，避免循环依赖
+                import sys, os
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "multiple-search"))
+                from soul import build_plan_replan_agent, Reasoner, AgenticNodesOperator
+                from soul import LegalDenseGraphBuilder as SoulGraphBuilder
+
+                # 构建 Agent（使用 soul.py 内的图引擎和操作器）
+                graph_engine = SoulGraphBuilder(embedding_dim=768)
+                agentic_ops = AgenticNodesOperator(
+                    api_key=self.classifier  # 此处实际需要传 API key，生产环境从配置获取
+                )
+
+                # 复用 router 自身的 embedder 作为检索编码器
+                def embed_fn(text):
+                    return self.embedder.encode(text, normalize_embeddings=True)
+
+                reasoner = Reasoner(
+                    legal_graph=graph_engine,
+                    embedding_fn=embed_fn,
+                    agentic_ops=agentic_ops
+                )
+
+                agent = build_plan_replan_agent(reasoner, agentic_ops)
+
+                initial_state = {
+                    "user_query": query,
+                    "task_queue": [],
+                    "past_observations": [],
+                    "final_report": "",
+                    "global_facts": [],
+                    "retry_context": {},
+                    "recursion_depth": 0
+                }
+
+                final_state = agent.invoke(initial_state)
+                result["agent_report"] = final_state.get("final_report", "")
+                result["agent_observations"] = final_state.get("past_observations", [])
+                result["status"] = "agent_execution"
+
+            except Exception as e:
+                logger.error(f"Agent 引擎调用失败: {e}")
+                result["status"] = "agent_error"
+                result["agent_error"] = str(e)
         else:
             result["status"] = "simple_rag" if result["intent"] == "SIMPLE_QA" else "chitchat"
         return result
@@ -189,7 +229,7 @@ class UnifiedQueryRouter:
 # 测试
 # ==========================================
 if __name__ == "__main__":
-    router = UnifiedQueryRouter()
+    router = UnifiedQueryRouter_Query()
 
     test_queries = [
         "你好！",

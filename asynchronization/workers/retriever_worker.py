@@ -30,25 +30,35 @@ def main():
             consumer.commit()
             continue
 
-        # 取当前待检索的子任务（假设从 task_queue[0] 取）
+        # 取当前待检索的子任务（v2: 支持 Dict 格式）
         if not state.get("task_queue"):
-            # 无任务，直接发给 Reasoner 结束？按你业务逻辑调整
             producer.send(TOPIC_REASONER_PENDING, key=session_id, value={"session_id": session_id})
             consumer.commit()
             continue
 
         current_task = state["task_queue"][0]
 
+        # ---- v2: 解析 Dict 任务 ----
+        if isinstance(current_task, dict):
+            actual_query = current_task.get("task_desc", str(current_task))
+            engine = current_task.get("engine", "GRAPH_TRAVERSAL")
+        else:
+            actual_query = str(current_task)
+            engine = "GRAPH_TRAVERSAL"
+            # 兼容旧 [WORMHOLE] 前缀
+            if actual_query.startswith("[WORMHOLE]"):
+                actual_query = actual_query[len("[WORMHOLE]"):].strip()
+                engine = "GLOBAL_DENSE_WORMHOLE"
+
         # 使用图引擎检索（这里简化，实际可复用 Reasoner 或直接调 search）
-        # 模拟检索过程
-        # 实际中应调用 engine 的检索方法，例如 engine.index.search(...)
-        retrieved_docs = []   # 你的检索结果
-        # 假设我们通过某种方式获得了文档内容
-        # ...
+        # 实际中应调用 engine 的检索方法
+        retrieved_docs = []
+        logger.info(f"Retriever [{engine}]: {actual_query[:60]}")
 
         # 将检索结果写入状态
         state.setdefault("past_observations", []).append({
-            "task": current_task,
+            "task": actual_query,
+            "engine": engine,
             "docs": retrieved_docs
         })
         # 移除已完成任务（或由 Grader 决定）

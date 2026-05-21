@@ -43,6 +43,86 @@ class LegalDenseGraphBuilder:
         self.tombstone_ids: Set[int] = set()          # 已软删除的节点 ID
         self.dirty_summary_ids: Set[int] = set()      # 需要重算的摘要节点 ID
 
+        # ---------- LoRA 支持 ----------
+        self._lora_loaded = False
+
+    # ------------------------------------------------------------------
+    # LoRA 权重加载（对齐 model/train/Retriever (BGE-M3).py 的训练产物）
+    # ------------------------------------------------------------------
+    def load_lora_weights(self, lora_path: str) -> bool:
+        """
+        加载微调后的 LoRA 适配器权重到 BGE-M3 编码器。
+        对齐 train/Retriever (BGE-M3).py 中 SentenceTransformer + peft 的训练产物。
+
+        :param lora_path: LoRA 权重目录路径或 HuggingFace 模型 ID
+        :return: 是否加载成功
+        """
+        try:
+            from peft import PeftModel
+            import torch
+
+            # BGEM3FlagModel 内部使用 AutoModel，通过 .model 访问底层 Transformer
+            # colbert_linear 是 BGE-M3 特有的线性投影层
+            base_model = self.encoder.model
+
+            logger.info(f"正在加载 LoRA 权重: {lora_path} ...")
+            self.encoder.model = PeftModel.from_pretrained(
+                base_model, lora_path
+            )
+            # 合并 LoRA 权重到基座（推理加速）
+            self.encoder.model = self.encoder.model.merge_and_unload()
+            self._lora_loaded = True
+            logger.info("LoRA 权重加载并合并完成，检索器已对齐训练产物。")
+            return True
+
+        except ImportError as e:
+            logger.warning(f"peft 库不可用，跳过 LoRA 加载: {e}")
+            logger.warning("请安装: pip install peft")
+            return False
+        except Exception as e:
+            logger.warning(f"LoRA 权重加载失败: {e}")
+            logger.warning("回退使用原始 BGE-M3 权重。")
+            return False
+
+    def load_lora_from_sentence_transformers(self, st_model_path: str) -> bool:
+        """
+        备选方案：从 SentenceTransformers 保存的 LoRA 模型加载。
+        适用于 train/Retriever (BGE-M3).py 中使用 model.save() 保存的场景。
+
+        该方法会用 SentenceTransformer 加载模型，然后提取其底层
+        Transformer 替换 BGEM3FlagModel 的 encoder。
+        """
+        try:
+            from sentence_transformers import SentenceTransformer
+            import torch
+
+            logger.info(f"从 SentenceTransformer 格式加载: {st_model_path} ...")
+            st_model = SentenceTransformer(st_model_path, device='cuda' if torch.cuda.is_available() else 'cpu')
+
+            # 提取底层 AutoModel 替换 BGEM3FlagModel 的 model
+            # SentenceTransformer 的 modules 列表中第一个是 Transformer
+            for module in st_model.modules():
+                if hasattr(module, 'auto_model'):
+                    self.encoder.model = module.auto_model
+                    self._lora_loaded = True
+                    logger.info("SentenceTransformer LoRA 模型加载完成。")
+                    return True
+
+            logger.warning("无法从 SentenceTransformer 中提取底层模型")
+            return False
+
+        except ImportError:
+            logger.warning("sentence_transformers 不可用")
+            return False
+        except Exception as e:
+            logger.error(f"SentenceTransformer LoRA 加载失败: {e}")
+            return False
+
+    @property
+    def is_lora_loaded(self) -> bool:
+        """是否已加载微调权重"""
+        return self._lora_loaded
+
     # ------------------------------------------------------------------
     # 原有编码与相似度方法（完全保留）
     # ------------------------------------------------------------------

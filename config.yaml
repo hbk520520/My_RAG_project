@@ -1,0 +1,122 @@
+# ==========================================
+# My_RAG_Project 统一配置文件
+# ==========================================
+
+# --- LLM API ---
+llm:
+  api_key: "${DEEPSEEK_API_KEY}"
+  base_url: "https://api.deepseek.com"
+  judge_model: "deepseek-chat"
+  temperature_plan: 0.1
+  temperature_extract: 0.1
+  temperature_reason: 0.1
+  temperature_generate: 0.3
+  temperature_judge: 0.0
+  max_tokens_default: 2048
+  max_tokens_judge: 512
+
+# --- 向量模型 ---
+embedding:
+  model_path: "./RAG_data/bge-legal-v1"
+  device: "cuda"
+  dimension: 1024
+  normalize: true
+
+# --- 图引擎 ---
+graph:
+  model_name: "BAAI/bge-m3"
+  use_fp16: true
+  embedding_dim: 1024
+  alpha_dense: 0.3
+  connect_threshold: 0.85
+  label_threshold: 0.99
+  top_k_search: 50
+  degree_threshold: 15
+
+# --- 路由分类器 ---
+router:
+  complex_semantic_threshold: 0.40
+  complex_length_threshold: 80
+  simple_confidence_floor: 0.10
+
+# --- Kafka ---
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topics:
+    planner_pending: "topic.planner.pending"
+    retriever_pending: "topic.retriever.pending"
+    grader_pending: "topic.grader.pending"
+    replanner_pending: "topic.replanner.pending"
+    reasoner_pending: "topic.reasoner.pending"
+  consumer:
+    auto_offset_reset: "earliest"
+    enable_auto_commit: false
+    max_poll_records: 1
+  producer:
+    acks: "all"
+    compression_type: "gzip"
+    max_in_flight: 5
+
+# --- Redis ---
+redis:
+  url: "redis://localhost:6379"
+  state_expire_seconds: 3600
+
+# --- 语义缓存 ---
+cache:
+  threshold: 0.98
+  engine: "redis"          # "redis" 或 "memory"
+  index_name: "legal_semantic_cache"
+
+# --- 沙箱 ---
+sandbox:
+  image: "legal-sandbox:v1"
+  mem_limit: "512m"
+  cpu_quota: 50000
+  network_mode: "none"
+  execution_timeout: 10
+  max_retries: 3
+  idle_cleanup_seconds: 600
+
+# --- 智能体 ---
+agent:
+  max_recursion_depth: 5
+  max_retries_per_task: 2
+  wormhole_threshold: 2      # 失败超过此次数触发虫洞
+
+# --- 可观测性 ---
+observability:
+  log_level: "INFO"
+  log_format: "json"         # "json" 或 "text"
+  prometheus_port: 9090
+  health_check_port: 8080
+
+# --- 训练 ---
+training:
+  unsloth:
+    load_in_4bit: true
+    lora_r: 64
+    lora_alpha: 128
+  planner:
+    base_model: "Qwen/Qwen2.5-14B-Instruct"
+    epochs: 3
+    learning_rate: 2.0e-5
+  replanner:
+    base_model: "Qwen/Qwen2.5-14B-Instruct"
+    epochs: 1
+    learning_rate: 1.0e-5
+  extractor_grader:
+    base_model: "Qwen/Qwen2.5-3B-Instruct"
+    epochs: 1
+    learning_rate: 5.0e-6
+    dpo_beta: 0.1
+  reasoner:
+    base_model: "Qwen/Qwen2.5-7B-Instruct"
+    epochs: 2
+    learning_rate: 1.0e-5
+  retriever:
+    base_model: "BAAI/bge-m3"
+    lora_r: 8
+    lora_alpha: 16
+    epochs: 3
+    learning_rate: 2.0e-5

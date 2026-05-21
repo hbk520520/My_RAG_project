@@ -30,16 +30,28 @@ class SemanticCache:
     def add(self, query_vector: np.ndarray, answer: str):
         """将新问答对加入缓存"""
         self.store.store(query_vector, answer)
-class UnifiedQueryRouter:
-    def __init__(self, cache: Optional[SemanticCache] = None):
-        # ... 原有初始化 ...
+class UnifiedQueryRouter_Soul:
+    """
+    soul.py 专用路由包装器，集成语义缓存。
+    委托给 query.py 的 UnifiedQueryRouter_Query 做实际路由，
+    本层仅负责缓存拦截和写回。
+    """
+
+    def __init__(self, cache: Optional[SemanticCache] = None, query_router=None):
         self.cache = cache
-        # ...
+        # 延迟导入避免循环依赖
+        if query_router is None:
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+            from query import UnifiedQueryRouter_Query
+            self._router = UnifiedQueryRouter_Query()
+        else:
+            self._router = query_router
 
     def process(self, query: str) -> Dict[str, Any]:
         # 1. 语义缓存拦截
         if self.cache:
-            q_vec = self.embedder.encode(query, normalize_embeddings=True)
+            q_vec = self._router.embedder.encode(query, normalize_embeddings=True)
             cached_answer = self.cache.lookup(q_vec)
             if cached_answer is not None:
                 logger.info("⚡ 语义缓存命中，跳过后续流程")
@@ -49,16 +61,23 @@ class UnifiedQueryRouter:
                     "response": cached_answer
                 }
 
-        # 2. 原有路由流程
-        result = self.route(query)  # ... 你的三层漏斗 ...
+        # 2. 委托给 query.py 的路由逻辑
+        result = self._router.process(query)
 
-        # 3. 生成最终答案后写回缓存 (示例，真实场景在最终答案生成后执行)
-        # if result.get("status") == "simple_rag" or result.get("final_report"):
-        #     answer = result.get("response") or result.get("final_report", "")
-        #     if answer and self.cache:
-        #         self.cache.add(q_vec, answer)
+        # 3. 写回缓存：对简单问答和复杂任务的结果进行缓存
+        if self.cache and result.get("status") in ("simple_rag", "agent_execution"):
+            answer = result.get("response") or result.get("agent_report", "")
+            if answer:
+                self.cache.add(
+                    self._router.embedder.encode(query, normalize_embeddings=True),
+                    answer
+                )
 
         return result
+
+    def route(self, query: str) -> Dict[str, Any]:
+        """透传路由方法"""
+        return self._router.route(query)
 # ============================================================================
 # 第一部分：法律稠密图引擎（igraph + FAISS）—— 保持原样
 # ============================================================================
@@ -223,21 +242,81 @@ class AgenticNodesOperator(LegalLLMBase):
             logger.warning("Grader JSON 解析失败，退回 irrelevant")
             return {"status": "irrelevant", "rationale": "Grader 解析错误"}
 
-    def replan_with_wormhole(self, query: str, global_facts: list, fail_log: str) -> List[str]:
+    def replan_with_wormhole(self, query: str, global_facts: list, fail_log: str,
+                             fail_count: int = 0) -> List[Dict]:
         """
-        虫洞重规划：输出新的任务列表（字符串），若需虫洞则在描述前加 [WORMHOLE] 前缀
+        虫洞重规划 v2：输出任务列表，每个任务含 task_desc / engine / rationale。
+        engine: 'GRAPH_TRAVERSAL' (图游走) 或 'GLOBAL_DENSE_WORMHOLE' (全局向量穿越)
         """
-        system_prompt = """你是一个重规划引擎。前序任务已失败。
-        如果图谱线索断裂，你可以启用虫洞进行全局搜索。
-        严格输出JSON：{"task_queue": ["步骤1", "步骤2"]}。
-        虫洞任务请以 "[WORMHOLE]" 开头。"""
+        system_prompt = f"""你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前系统的法律检索路径已陷入死胡同，你需要基于全局事实账本，推翻或改写下一步的调查计划。
+
+【可用引擎说明】：
+1. GRAPH_TRAVERSAL（图谱游走）：系统默认引擎。在当前案件领域内寻找相邻线索（成本极低）。
+2. GLOBAL_DENSE_WORMHOLE（虫洞穿越）：当当前图谱已彻底断裂，必须跨法律领域寻找依据时使用（算力消耗极大！连续失败>=3次才建议开启）。
+
+【当前绝境状态】：
+- 系统已连续碰壁次数：{fail_count}
+- 碰壁原因：{fail_log}
+
+严格按照以下 JSON Schema 输出：
+{{"task_queue": [{{"task_desc": "...", "engine": "GRAPH_TRAVERSAL", "rationale": "..."}}]}}
+"""
         prompt = f"案情：{query}\n已有事实：{global_facts}\n失败记录：{fail_log}"
-        raw = self._call_llm(system_prompt, prompt, require_json=True)
+        raw = self._call_llm(system_prompt, prompt, require_json=True, temperature=0.4)
         try:
             data = json.loads(raw)
-            return data.get("task_queue", ["全局检索案情相关法条"])
+            tasks = data.get("task_queue", [])
+            result = []
+            for t in tasks:
+                if isinstance(t, dict):
+                    result.append({
+                        "task_desc": t.get("task_desc", t.get("task", str(t))),
+                        "engine": t.get("engine", "GRAPH_TRAVERSAL"),
+                        "rationale": t.get("rationale", "")
+                    })
+                else:
+                    result.append({"task_desc": str(t), "engine": "GRAPH_TRAVERSAL", "rationale": ""})
+            return result if result else [
+                {"task_desc": "全局检索案情相关法条", "engine": "GLOBAL_DENSE_WORMHOLE",
+                 "rationale": "兜底虫洞穿越"}
+            ]
         except Exception:
-            return [f"[WORMHOLE] 全局检索: {query}"]
+            return [{"task_desc": f"全局检索: {query[:50]}", "engine": "GLOBAL_DENSE_WORMHOLE",
+                     "rationale": "JSON解析降级"}]
+
+    # ====================== 沙箱代码生成 ======================
+    def generate_calculation_code(self, user_query: str,
+                                  reasoning_chain: List[Dict],
+                                  error_context: str = "") -> str:
+        """
+        生成 Python 计算代码（赔偿金/补偿金/加班费等金额）。
+        若 error_context 非空，表示上次代码执行失败，需要修正。
+        """
+        chain_text = ""
+        for item in reasoning_chain:
+            chain_text += (f"[{item.get('sub_task', '')}] "
+                           f"事实: {item.get('facts', '')} "
+                           f"推理: {item.get('reasoning', '')}\n")
+
+        correction_hint = ""
+        if error_context:
+            correction_hint = (f"\n【上次执行报错，请修正】\n{error_context}\n"
+                               "请分析错误原因并生成修正后的代码。")
+
+        system_prompt = f"""你是一名精通中国劳动法的法官助理兼Python程序员。
+根据以下案件事实和推理链，编写一段纯 Python 代码来计算最终的赔偿金额。
+
+【代码要求】：
+1. 变量命名清晰，使用中文注释说明每步对应的法律依据
+2. 最终结果必须赋值给变量 `result`
+3. 只输出可执行的 Python 代码，不要包裹在 ```python ``` 中
+4. 不要使用任何外部库（如 requests），只用标准库
+5. 不要进行任何文件读写或网络操作{correction_hint}"""
+
+        user_prompt = f"案件：{user_query}\n\n推理链：\n{chain_text}"
+
+        return self._call_llm(system_prompt, user_prompt, temperature=0.1)
 
 # ============================================================================
 # 第三部分：Reasoner 模块（负责检索 + 回答 + 信息充分性判断）
@@ -392,6 +471,11 @@ class AgentState(TypedDict):
     recursion_depth: int                                 # 熔断计数
     final_report: Optional[str]
     sandbox_session_id: Optional[str]
+    # ---- 沙箱相关字段 ----
+    generated_code: Optional[str]                        # LLM 生成的 Python 计算代码
+    calc_result: Optional[str]                           # 沙箱执行的计算结果
+    sandbox_retries: int                                 # 沙箱重试次数
+    needs_sandbox_calc: bool                             # 是否需要金额计算
 
 
 def node_l0_gateway(state: AgentState) -> dict:
@@ -416,29 +500,39 @@ def node_planner(state: AgentState) -> dict:
 def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     if not state["task_queue"]:
         return {}
-    # ---- 新增熔断保护 ----
+    # ---- 熔断保护 ----
     depth = state.get("recursion_depth", 0)
     if depth > 5:
         logger.warning("🚨 触发算力熔断，强制终止")
         return {"retry_context": {"status": "force_stop"}}
 
     current_task = state["task_queue"][0]
-    # ---- 新增：解析虫洞前缀 ----
-    actual_query = current_task
-    is_wormhole = False
-    if current_task.startswith("[WORMHOLE]"):
-        actual_query = current_task[len("[WORMHOLE]"):].strip()
-        is_wormhole = True
-        logger.info(f"虫洞穿越模式激活: {actual_query}")
 
-    logger.info(f"Executor 正在处理: {current_task}")
+    # ---- v2: 解析 Dict 任务格式 ----
+    if isinstance(current_task, dict):
+        actual_query = current_task.get("task_desc", str(current_task))
+        engine = current_task.get("engine", "GRAPH_TRAVERSAL")
+        rationale = current_task.get("rationale", "")
+        is_wormhole = (engine == "GLOBAL_DENSE_WORMHOLE")
+    else:
+        # 兼容旧字符串格式
+        actual_query = str(current_task)
+        engine = "GRAPH_TRAVERSAL"
+        rationale = ""
+        is_wormhole = actual_query.startswith("[WORMHOLE]")
+        if is_wormhole:
+            actual_query = actual_query[len("[WORMHOLE]"):].strip()
+
+    if is_wormhole:
+        logger.info(f"🌌 虫洞穿越模式激活 (engine={engine}): {actual_query[:60]}")
+    logger.info(f"Executor 正在处理: {actual_query[:80]}")
 
     # 使用 Reasoner 进行检索、推理、判断充足性
-    # Reasoner.answer 已升级为使用 Grader
     result = reasoner.answer(actual_query, original_query=state["user_query"])
 
-    # 构造观察记录（保留原有格式）
-    observation = (f"【任务：{current_task}】\n"
+    # 构造观察记录（包含引擎信息）
+    task_label = actual_query[:60]
+    observation = (f"【任务：{task_label}】【引擎：{engine}】\n"
                    f"事实：{result['fact']}\n"
                    f"推理：{result['reasoning']}")
 
@@ -450,8 +544,13 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
 
     if not sufficient:
         suggestion = result.get("suggestion", "需要更精准的法律检索")
-        # 原有逻辑：插入补充任务（保留）
-        new_queue = [f"{current_task}（补充：{suggestion}）"] + new_queue
+        # v2: 补充任务使用 Dict 格式
+        supplement_task = {
+            "task_desc": f"{actual_query[:40]}（补充：{suggestion}）",
+            "engine": engine,  # 保持原引擎
+            "rationale": f"信息不足补搜: {suggestion[:60]}"
+        }
+        new_queue = [supplement_task] + new_queue
         observation += f"\n⚠️ 信息不足，已添加补充任务：{suggestion}"
 
         # 新增：设置 retry_context 供 Replanner 决策
@@ -481,6 +580,7 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
 
 
 def node_replanner(state: AgentState) -> dict:
+    """v2: 支持 Pydantic 强类型任务格式 (task_desc + engine + rationale)"""
     obs_text = "\n".join(state.get("past_observations", []))
     queue = state["task_queue"]
     retry_ctx = state.get("retry_context", {})
@@ -490,40 +590,74 @@ def node_replanner(state: AgentState) -> dict:
         logger.info("所有任务完成，准备生成最终报告")
         return {}
 
-    # ---- 新增：基于 retry_context 的重规划决策 ----
-    status = retry_ctx.get("status")
+    status = retry_ctx.get("status") or retry_ctx.get("grader_status")
     fail_count = retry_ctx.get("fail_count", 0)
 
     # 情况1：强制停止
     if status == "force_stop":
+        logger.warning("算力熔断，强制终止")
         return {"task_queue": []}
 
-    # 情况2：无头绪 (irrelevant) 或部分缺失且重试超过2次 -> 虫洞重规划
+    # 情况2：无头绪或部分缺失且重试超过阈值 -> LLM 虫洞重规划
     if status == "irrelevant" or (status == "partial" and fail_count > 2):
-        logger.info("触发虫洞重规划引擎")
-        # 尝试使用 agentic_ops 的 replan_with_wormhole，若不可用则生成简单虫洞任务
-        if hasattr(state, 'agentic_ops'):  # 实际无法直接获取，改为通过闭包传递，此处简化处理
-            new_queue = ["[WORMHOLE] 全局检索相关法条"]  # 默认虫洞任务
-        else:
-            new_queue = ["[WORMHOLE] 全局检索相关法条"]
-        return {"task_queue": new_queue, "retry_context": {}}
+        logger.info("触发虫洞重规划引擎 (LLM)")
+        from openai import OpenAI
+        import os as _os
+        _sys_path = _os.path.join(_os.path.dirname(__file__), "..")
+        import sys as _sys
+        _sys.path.insert(0, _sys_path)
+        try:
+            from config_loader import cfg as _cfg
+            client = OpenAI(api_key=_cfg.get("llm", "api_key"), base_url=_cfg.get("llm", "base_url"))
+        except Exception:
+            client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY", ""), base_url="https://api.deepseek.com")
 
-    # 情况3：原有规则补充（如未签订劳动合同加双倍工资）
-    if "未签订劳动合同" in obs_text and not any("双倍工资" in t for t in queue):
-        new_queue = [
-            "核查未签劳动合同二倍工资仲裁时效",
-            "合并计算二倍工资差额与违法解除赔偿金"
-        ]
-        logger.info(f"Replanner 硬规则补充，新队列: {new_queue}")
-        return {"task_queue": new_queue, "retry_context": {}}
+        class _ReplanOps:
+            def __init__(self, c): self.client = c
+            def _call_llm(self, sp, up, require_json=False, temperature=0.4):
+                kw = {"model": "deepseek-chat", "messages": [{"role":"system","content":sp},{"role":"user","content":up}], "temperature": temperature, "max_tokens": 2048}
+                if require_json: kw["response_format"] = {"type":"json_object"}
+                return self.client.chat.completions.create(**kw).choices[0].message.content.strip()
 
-    # 默认保持原队列继续执行
-    return {}
+        ops = _ReplanOps(client)
+
+        system_prompt = f"""你是一个经过强化学习训练的顶级重规划引擎。
+当前图谱检索已陷入死胡同。连续碰壁次数：{fail_count}。碰壁原因：{obs_text[-300:]}。
+可用引擎：GRAPH_TRAVERSAL (图游走) / GLOBAL_DENSE_WORMHOLE (虫洞穿越)。
+严格输出JSON：{{"task_queue":[{{"task_desc":"...","engine":"GRAPH_TRAVERSAL","rationale":"..."}}]}}"""
+        try:
+            raw = ops._call_llm(system_prompt, f"案情：{state['user_query']}\n事实：{state.get('global_facts',[])}", require_json=True, temperature=0.4)
+            data = json.loads(raw)
+            new_queue = []
+            for t in data.get("task_queue", []):
+                new_queue.append({
+                    "task_desc": t.get("task_desc", str(t)),
+                    "engine": t.get("engine", "GRAPH_TRAVERSAL"),
+                    "rationale": t.get("rationale", "")
+                })
+            if not new_queue:
+                new_queue = [{"task_desc": "全局检索相关法条", "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "兜底"}]
+        except Exception:
+            new_queue = [{"task_desc": state["user_query"][:60], "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "异常降级"}]
+    else:
+        # 情况3：原有规则补充（兼容字符串和 Dict 格式）
+        new_queue = list(queue)  # 保持原队列
+        if "未签订劳动合同" in obs_text:
+            has_double = any(
+                (t.get("task_desc","") if isinstance(t, dict) else str(t)).find("双倍工资") >= 0
+                for t in queue
+            )
+            if not has_double:
+                new_queue = [
+                    {"task_desc": "核查未签劳动合同二倍工资仲裁时效", "engine": "GRAPH_TRAVERSAL", "rationale": "硬规则"},
+                    {"task_desc": "合并计算二倍工资差额与违法解除赔偿金", "engine": "GRAPH_TRAVERSAL", "rationale": "硬规则"},
+                ] + new_queue
+
+    return {"task_queue": new_queue, "retry_context": {}}
 
 
 def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
     logger.info("Generator 生成最终法律意见书")
-    # 保留原有上下文构建方式
     accumulated = []
     for idx, obs in enumerate(state.get("past_observations", [])):
         accumulated.append({
@@ -532,11 +666,185 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
             "reasoning": obs
         })
     report = agentic_ops.generate_final_report(state["user_query"], accumulated)
-    return {"final_report": report}
+
+    # 检测是否需要金额计算 → 触发沙箱流程
+    calc_keywords = ["赔偿", "补偿", "加班费", "工资", "双倍", "2N", "N+1", "金额", "元"]
+    needs_calc = any(kw in state["user_query"] + report for kw in calc_keywords)
+
+    result = {"final_report": report}
+    if needs_calc:
+        result["needs_sandbox_calc"] = True
+        result["sandbox_retries"] = 0
+        logger.info("检测到金额计算需求，将进入沙箱执行流程")
+    return result
 
 
 # ============================================================================
-# 第六部分：组装 LangGraph 图（仅增加 L0 节点，路由增强）
+# 沙箱节点：代码生成 → 执行 → 结果注入
+# ============================================================================
+def node_write_code(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
+    """生成 Python 计算代码"""
+    logger.info("📝 沙箱阶段: 生成计算代码")
+
+    # 从 past_observations 提取推理链
+    reasoning_chain = []
+    obs_list = state.get("past_observations", [])
+    for obs in obs_list:
+        if isinstance(obs, dict):
+            reasoning_chain.append({
+                "sub_task": obs.get("task", ""),
+                "facts": str(obs.get("extracted_facts", "")),
+                "reasoning": str(obs.get("status", ""))
+            })
+        elif isinstance(obs, str):
+            reasoning_chain.append({"sub_task": "", "facts": obs, "reasoning": ""})
+
+    error_ctx = state.get("retry_context", {}).get("sandbox_error", "")
+    code = agentic_ops.generate_calculation_code(
+        state["user_query"], reasoning_chain, error_context=error_ctx
+    )
+
+    return {
+        "generated_code": code,
+        "sandbox_retries": state.get("sandbox_retries", 0)
+    }
+
+
+def node_execute_code(state: AgentState) -> dict:
+    """在 Docker 沙箱中执行代码"""
+    logger.info("🐳 沙箱阶段: 执行计算代码")
+
+    code = state.get("generated_code", "")
+    if not code:
+        return {"retry_context": {"sandbox_error": "无代码可执行"}}
+
+    # 尝试使用 Docker 沙箱，失败则回退本地执行
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "legal_sandbox"))
+        from sandbox_manager import DockerSandboxManager
+
+        session_id = state.get("sandbox_session_id")
+        manager = DockerSandboxManager()
+
+        if not session_id:
+            try:
+                session_id = manager.start_session()
+            except Exception as e:
+                logger.warning(f"沙箱容器创建失败: {e}，回退本地执行")
+                return _execute_locally(state, code)
+
+        result = manager.execute_code(session_id, code)
+
+        if result.get("error"):
+            logger.warning(f"沙箱执行报错: {result['error']}")
+            retries = state.get("sandbox_retries", 0) + 1
+            if retries < 3:
+                return {
+                    "retry_context": {"sandbox_error": result["error"]},
+                    "sandbox_retries": retries,
+                    "sandbox_session_id": session_id
+                }
+            # 超过重试上限，记录错误继续
+            return {
+                "calc_result": f"沙箱多次执行失败: {result['error']}",
+                "sandbox_session_id": session_id
+            }
+
+        logger.info(f"沙箱执行成功: {result.get('output', '')[:100]}")
+        return {
+            "calc_result": result.get("output", "").strip(),
+            "sandbox_session_id": session_id
+        }
+
+    except ImportError:
+        logger.warning("Docker SDK 不可用，回退本地执行")
+        return _execute_locally(state, code)
+
+
+def _execute_locally(state: AgentState, code: str) -> dict:
+    """本地安全执行 Python 代码（受限环境回退方案）"""
+    import io, sys as _sys, traceback
+
+    old_stdout = _sys.stdout
+    redirected = io.StringIO()
+    _sys.stdout = redirected
+
+    error_msg = None
+    # 受限的全局命名空间
+    safe_globals = {
+        "__builtins__": {
+            "abs": abs, "min": min, "max": max, "sum": sum,
+            "round": round, "int": int, "float": float,
+            "len": len, "range": range, "list": list,
+            "dict": dict, "str": str, "bool": bool,
+            "True": True, "False": False, "None": None,
+            "print": print, "isinstance": isinstance,
+        }
+    }
+
+    try:
+        exec(code, safe_globals)
+        result_value = safe_globals.get("result", "未定义 result 变量")
+    except Exception:
+        error_msg = traceback.format_exc()
+    finally:
+        _sys.stdout = old_stdout
+
+    output = redirected.getvalue().strip()
+    if error_msg:
+        retries = state.get("sandbox_retries", 0) + 1
+        if retries < 3:
+            return {
+                "retry_context": {"sandbox_error": error_msg},
+                "sandbox_retries": retries
+            }
+        return {"calc_result": f"执行失败: {error_msg}"}
+
+    # 提取 result 变量值
+    try:
+        result_str = str(safe_globals.get("result", output or "计算完成"))
+    except Exception:
+        result_str = output or "计算完成"
+
+    return {"calc_result": result_str}
+
+
+def node_inject_calc_result(state: AgentState) -> dict:
+    """将沙箱计算结果注入最终报告"""
+    calc_result = state.get("calc_result", "")
+    final_report = state.get("final_report", "")
+
+    if calc_result:
+        enriched_report = (
+            f"{final_report}\n\n"
+            f"【计算明细】\n"
+            f"经代码核算，最终结果为：{calc_result}"
+        )
+        logger.info("沙箱计算结果已注入最终报告")
+        return {"final_report": enriched_report}
+
+    return {}
+
+
+def node_cleanup_sandbox(state: AgentState) -> dict:
+    """清理沙箱资源"""
+    session_id = state.get("sandbox_session_id")
+    if session_id:
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "legal_sandbox"))
+            from sandbox_manager import DockerSandboxManager
+            manager = DockerSandboxManager()
+            manager.destroy_session(session_id)
+            logger.info(f"沙箱 {session_id} 已销毁")
+        except Exception as e:
+            logger.warning(f"沙箱清理异常: {e}")
+    return {"sandbox_session_id": None}
+
+
+# ============================================================================
+# 第六部分：组装 LangGraph 图（含沙箱节点）
 # ============================================================================
 def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperator):
     builder = StateGraph(AgentState)
@@ -547,15 +855,23 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
     def executor(state): return node_executor(state, reasoner)
     def replanner(state): return node_replanner(state)
     def generate(state): return node_generate(state, agentic_ops)
+    def write_code(state): return node_write_code(state, agentic_ops)
+    def execute_code(state): return node_execute_code(state)
+    def inject_result(state): return node_inject_calc_result(state)
+    def cleanup(state): return node_cleanup_sandbox(state)
 
-    # 节点注册（增加 L0_Gateway）
+    # 节点注册
     builder.add_node("L0_Gateway", l0_gateway)
     builder.add_node("Planner", planner)
     builder.add_node("Executor", executor)
     builder.add_node("Replanner", replanner)
     builder.add_node("Generate", generate)
+    builder.add_node("WriteCode", write_code)
+    builder.add_node("ExecuteCode", execute_code)
+    builder.add_node("InjectResult", inject_result)
+    builder.add_node("Cleanup", cleanup)
 
-    # 拓扑：L0 -> Planner -> Executor -> Replanner
+    # 拓扑: L0 → Planner → Executor → Replanner
     builder.set_entry_point("L0_Gateway")
     builder.add_edge("L0_Gateway", "Planner")
     builder.add_edge("Planner", "Executor")
@@ -563,7 +879,6 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
 
     # Replanner 后根据队列和熔断状态决定去向
     def route_after_replan(state: AgentState):
-        # 新增：强制停止直接结案
         if state.get("retry_context", {}).get("status") == "force_stop":
             return "Generate"
         if len(state.get("task_queue", [])) == 0:
@@ -571,13 +886,38 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
         return "Executor"
 
     builder.add_conditional_edges("Replanner", route_after_replan)
-    builder.add_edge("Generate", END)
+
+    # Generate 后判断是否需要沙箱计算
+    def route_after_generate(state: AgentState):
+        if state.get("needs_sandbox_calc"):
+            return "WriteCode"
+        return "Cleanup"
+
+    builder.add_conditional_edges("Generate", route_after_generate)
+
+    # WriteCode → ExecuteCode
+    builder.add_edge("WriteCode", "ExecuteCode")
+
+    # ExecuteCode 后判断是否需要重试
+    def route_after_execute(state: AgentState):
+        retry_ctx = state.get("retry_context", {})
+        sandbox_retries = state.get("sandbox_retries", 0)
+        if "sandbox_error" in retry_ctx and sandbox_retries < 3:
+            logger.info(f"沙箱重试 {sandbox_retries}/3")
+            return "WriteCode"
+        return "InjectResult"
+
+    builder.add_conditional_edges("ExecuteCode", route_after_execute)
+
+    # InjectResult → Cleanup → END
+    builder.add_edge("InjectResult", "Cleanup")
+    builder.add_edge("Cleanup", END)
 
     return builder.compile()
 
 
 # ============================================================================
-# 第七部分：运行示例（使用 Mock 数据演示，替换真实服务即可运行）
+# 第七部分：运行示例
 # ============================================================================
 if __name__ == "__main__":
     # 1. 模拟图谱（实际应用请加载真实数据）

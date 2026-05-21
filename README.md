@@ -1,4 +1,8 @@
-# My_RAG_project
+# My_RAG_project — 法律智能体 RAG-plus
+
+> 从基础 RAG 演进为 Plan-and-Replan 法律智能体系统
+
+## 项目结构
 本来只是想要做一个最基础的RAG项目的，但是发现这不适配于复杂的法律项目，用后面提到的benchmark做评分蛮低的，于是我想做一个RAG_plus
 注意我们的项目是没有generate大模型的
 1.dataset
