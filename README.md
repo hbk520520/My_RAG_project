@@ -46,15 +46,16 @@
 │       └── example_usage.py       # 集成示例
 │
 └── model/                         # 训练层
-    ├── Unsloth.py                 # 4-bit QLoRA 加速训练
-    ├── path-from-ds.py            # Evol-Instruct 反向出题
-    ├── query-generated.py         # 高噪点口语化 Query 生成
-    └── train/
-        ├── Meta-planner.py        # SFT
-        ├── Repalnner.py           # GRPO
-        ├── Graderand Extractor.py # DPO
-        ├── Reasoner.py            # 长上下文 SFT
-        └── Retriever (BGE-M3).py  # LoRA + MNR Loss
+    ├── data/
+    │   └── evol_instruct.py       # 🆕 Evol-Instruct 数据工厂 (合并)
+    ├── training/
+    │   ├── train_meta_planner.py  # Meta-Planner SFT + DTW筛选
+    │   ├── train_replanner_grpo.py# 🆕 Replanner GRPO 淘汰赛制
+    │   ├── train_extractor_grader.py# Extractor+Grader DPO
+    │   ├── train_reasoner.py      # Reasoner 长上下文 SFT
+    │   └── train_retriever.py     # BGE-M3 LoRA 微调
+    └── utils/
+        └── unsloth_loader.py      # 🆕 Unsloth 通用加载器
 ```
 
 ## 数据流
@@ -177,9 +178,18 @@
 * **怎么用**：上面提到的三个模型，训练的第一步完全一样：先使用大模型的 API **生成交互轨迹（Trajectory）**，然后对轨迹进行科学**切分**，最后交给对应模型进行第一轮 **SFT (监督微调)**。
 
 ### （2）分支微调与强化策略
-* 🧠 **Meta-planner**：采用**单纯的 SFT** 进行训练。
-  * *原因有二*：一是其搜索空间太大，使用强化学习（RL）难以收敛；二是其本质作用在于“翻译与抽象”，不需要任何自由发挥。
-* 🔄 **Replaner**：采用 **GRPO (群体相对策略优化)** 算法进行强化训练。需要编写一段特定的 Python 代码作为 Reward Function，去评价其生成答案的好坏（核心考核**准确性与长度**）。
+* 🧠 **Meta-planner**：采用**单纯的 SFT** + **SemanticDTW 数据筛选**进行训练。
+  * *原因有二*：一是其搜索空间太大，使用强化学习（RL）难以收敛；二是其本质作用在于"翻译与抽象"，不需要任何自由发挥。
+  * **📐 SemanticDTW 数据筛选**：使用 BGE-M3 对 Planner 生成的步骤序列与图数据库黄金路径进行**非对称语义 DTW (Dynamic Time Warping)** 对齐评分。通过 `gamma_penalty` 抑制冗余步骤，`lambda_scale` 控制好/坏计划的分数断层。低于阈值 (0.3) 的低质量训练样本自动剔除，确保 SFT 数据纯度。
+* 🔄 **Replaner**：采用 **GRPO (群体相对策略优化)** + **8→4→2 三层淘汰赛制**进行强化训练。
+
+  **🏟️ 淘汰赛机制 (GRPO Tournament)**：
+  1. 模型为每个 Prompt 生成 **8 个候选计划**
+  2. **Round 1 (8→4)**：8 个候选各自执行第一跳检索，用 **BGE-Reranker-v2-m3** 作为 PRM (Process Reward Model) 进行毫秒级相关度打分，淘汰得分最低的 4 个（施加早死惩罚）
+  3. **Round 2 (4→2)**：4 个幸存者执行第二跳检索，PRM 再次打分，再淘汰 2 个
+  4. **Final Round (2 幸存)**：仅存的 2 个精英方案完整跑沙箱终局裁判，成功者获巨额奖金 (+15)，失败者受重罚 (-5)
+
+  **核心收益**：8 个候选只需对 2 个跑昂贵沙箱，其余 6 个用毫秒级 PRM 快速淘汰 → 成本降低 ~75%
 * ✂️ **Extractor & Grader**：采用 **DPO (直接偏好优化)** 进行对齐训练。同样使用 DeepSeek API 去生成训练对（注意：Prompt 要求步骤尽可能的少），然后与自己经过 SFT 微调后的答案去配对（构成 $M \times N$ 个对）。
   * **💡 核心踩坑省钱经验（极其重要）**：一开始我为了拉开差距，调高了 DeepSeek 的 `temperature`，让它生成 8 个不同的答案，我再按照步骤长短、匹配性去评分并进行正负对配对。**事实证明这样子生成的训练对差距太小了，效果很差**。改用自己 SFT 后生成的数据与 DS 配对，既可以保持系统的语义对齐，又不会太混乱。
   * **最终路线**：先用 DeepSeek 和自己 SFT 的结果配对（此时把自己的基座模型 KL 散度值调高一点），再用 DeepSeek 自身的结果去进行两个阶段的训练。

@@ -227,19 +227,31 @@ def main():
             consumer.commit()
             continue
 
-        # 1. 先尝试硬规则
+        # 1. 先尝试硬规则（追加到当前队列前面，不覆盖已完成部分）
         hard_tasks = apply_hard_rules(obs_text, current_queue)
         if hard_tasks:
             new_queue = hard_tasks + current_queue
             state["retry_context"] = {"status": "hard_rule_expanded"}
         else:
-            # 2. 否则走 LLM 重规划
+            # 2. 否则走 LLM 重规划 —— 只针对当前失败的子任务，而非整个问题
             retry_context["fail_log"] = obs_text[-500:] if obs_text else "无有效检索结果"
-            new_queue = replanner_ops.generate_new_plan(
-                state.get("user_query", ""),
-                state.get("global_facts", []),
-                retry_context
+
+            # ---- 关键修复：Replanner 只重规划当前失败的任务 ----
+            current_failed_task = current_queue[0] if current_queue else {}
+            failed_desc = (
+                current_failed_task.get("task_desc", "")
+                if isinstance(current_failed_task, dict)
+                else str(current_failed_task)
             )
+            replan_target = failed_desc if failed_desc else state.get("user_query", "")
+
+            new_tasks = replanner_ops.generate_new_plan(
+                original_query=replan_target,      # ← 只传失败的子任务
+                global_facts=state.get("global_facts", []),
+                retry_context=retry_context
+            )
+            # 新任务替换队列头，保留队列尾部（其他未执行的任务）
+            new_queue = new_tasks + current_queue[1:]
             state["retry_context"] = {"status": "llm_replanned"}
             state["recursion_depth"] = state.get("recursion_depth", 0) + 1
 
