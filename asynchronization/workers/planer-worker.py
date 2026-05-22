@@ -1,10 +1,12 @@
 """
-Planner Worker —— 消费 Planner 队列，调用 Meta-Planner 生成任务队列
+Planner Worker —— 第一棒：接到新问题，拆成调查步骤
+===============================================
+从 Kafka 拿到会话，调 Meta-Planner 生成双层蓝图（S_q DAG + C_q 具象化），
+展平成按依赖拓扑排序的执行队列，写回 Redis 然后交给下一棒的 Retriever。
+
+技术栈: Kafka / Redis / DeepSeek API / double_layer_plan
 """
-import sys
-import os
-import json
-import logging
+import sys, os, json, logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

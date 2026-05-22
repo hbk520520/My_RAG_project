@@ -1,3 +1,11 @@
+"""
+Kafka 消息工具 —— Worker 之间靠它在不直接见面的情况下传递任务
+========================================================
+五个 Topic 对应五个 Worker 角色，Producer 打 gzip 压缩发消息，
+Consumer 手动提交位移保证至少处理一次。
+
+技术栈: kafka-python (KafkaProducer / KafkaConsumer)
+"""
 from kafka import KafkaConsumer, KafkaProducer
 import json
 import os

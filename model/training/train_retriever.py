@@ -1,8 +1,11 @@
 """
-train_retriever.py —— Retriever (BGE-M3) LoRA 微调
-====================================================
-模型：BAAI/bge-m3 + LoRA (仅微调 q_proj/v_proj)
-损失：MultipleNegativesRankingLoss (三元组: query, positive, negative)
+Retriever 微调 —— BGE-M3 挂 LoRA，三元组对比学习
+===============================================
+只微调 q_proj 和 v_proj，用 MultipleNegativesRankingLoss：
+给定 query，让正例文档在向量空间里更近、负例更远。
+训练完的 LoRA 权重通过 graph.py 的 load_lora_weights() 加载到图引擎。
+
+技术栈: SentenceTransformer / peft (LoRA) / MNR Loss
 """
 import os
 import sys

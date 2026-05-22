@@ -1,8 +1,11 @@
 """
-train_reasoner.py —— Reasoner 长上下文 SFT 训练
-===============================================
-模型：Qwen2.5-7B-Instruct + LoRA (Flash Attention 2)
-数据：reasoner_qa.jsonl (IRAC 格式法律推理)
+Reasoner 训练 —— 长上下文 SFT，学会 IRAC 推演
+===========================================
+7B 模型，Flash Attention 2 开满，梯度检查点省显存。
+数据是 IRAC 格式（Issue→Rule→Application→Conclusion），
+训练后能基于已有事实做严格的法律三段论。
+
+技术栈: SFTTrainer (trl) / Unsloth / Flash Attention 2
 """
 import os
 import sys

@@ -1,8 +1,10 @@
 """
-train_meta_planner.py —— Meta-Planner SFT 训练 (v2 + SemanticDTW 数据筛选)
-==========================================================================
-模型：Qwen2.5-14B-Instruct + LoRA (Unsloth)
-新增：SemanticDTWRewarder 语义 DTW 评分器 —— 用于 DPO 数据自动筛选
+Meta-Planner 训练 —— SFT + SemanticDTW 数据过滤
+===============================================
+14B 模型做 SFT 就够了（它本质是"翻译"而不是"创作"），
+训练前用 SemanticDTW 对齐评分把低质量样本自动筛掉。
+
+技术栈: Unsloth (4-bit QLoRA) / SFTTrainer / SentenceTransformer
 """
 import os, sys, json, logging
 import numpy as np

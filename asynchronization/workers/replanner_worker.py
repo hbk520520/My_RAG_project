@@ -1,11 +1,15 @@
 """
-Replanner Worker v2 —— 基于 Pydantic 强类型约束 + 显式引擎选择
-引擎：GRAPH_TRAVERSAL (图游走) / GLOBAL_DENSE_WORMHOLE (全局向量穿越)
+Replanner Worker v2 —— 第四棒（救火队）：前面卡住了，重新规划
+==========================================================
+当前子任务怎么查都查不到时，这里接手。
+先看有没有硬规则能命中（比如"提到加班却没算加班费"），
+命中就追加；否则调 Replanner 模型生成新步骤，还能开启虫洞跨领域搜。
+
+任务格式用 Pydantic 强类型：task_desc + engine + rationale，训练时 GRPO 可回溯。
+
+技术栈: Kafka / Redis / Pydantic / DeepSeek API (JSON mode)
 """
-import sys
-import os
-import json
-import logging
+import sys, os, json, logging
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, ValidationError
 

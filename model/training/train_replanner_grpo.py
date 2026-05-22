@@ -1,11 +1,11 @@
 """
-train_replanner_grpo.py —— Replanner GRPO 强化训练 (v2 Tournament)
-==================================================================
-模型：Qwen2.5-14B-Instruct + LoRA (Unsloth)
-算法：GRPO + 8→4→2 三层淘汰赛制
-PRM  ：BGE-Reranker-v2-m3 毫秒级过程奖励模型
+Replanner GRPO 训练 —— 淘汰赛制让模型自己卷
+=========================================
+GRPO 不需要人工标注的"标准答案"，靠 Reward Function 打分。
+这里用了 8→4→2 三层淘汰赛：BGE-Reranker 毫秒级评第一跳、第二跳，
+只有最后 2 个精英方案才完整跑裁判，成本降了约 75%。
 
-核心：每个 prompt 生成 8 候选 → 逐跳淘汰 → 幸存者得终局奖金
+技术栈: GRPOTrainer (trl) / Unsloth / CrossEncoder (BGE-Reranker)
 """
 import os, sys, json, torch, logging
 import numpy as np

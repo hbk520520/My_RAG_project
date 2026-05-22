@@ -1,3 +1,11 @@
+"""
+语义缓存 —— 一样的问题别查两遍
+===========================
+用户问过的问题+答案存进向量库，下次相似问题来了直接返回。
+原型用内存，生产用 RedisVL（带余弦相似度阈值）。
+
+技术栈: numpy / redis (RedisVL) 可选
+"""
 import numpy as np
 from typing import Optional, Tuple
 

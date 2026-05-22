@@ -1,26 +1,21 @@
 """
-双层蓝图 Schema (S_q + C_q)
-===========================
-Meta-Planner 输出的核心数据结构。
+双层蓝图 Schema —— Meta-Planner 输出的"施工图纸"
+============================================
+S_q 是抽象推理骨架（DAG），描述做什么但不提具体实体。
+C_q 把抽象的节点映射到当前案件的具体查询。
+附带 DAG 环检测、拓扑排序、并行组识别，最后展平为 Executor 能吃的队列。
 
-S_q (抽象骨架):   有向无环图 (DAG)，节点描述「做什么」但不涉及具体实体
-C_q (具象化):     将抽象节点实例化为针对当前案件的具体查询文本
-
-示例：
-  S_q: {"nodes": [{"id":"1","abstract":"核实劳动关系","deps":[]},
-                  {"id":"2","abstract":"核查解除合法性","deps":["1"]}]}
-  C_q: {"concretions": {"1":"核实张三与A公司的劳动关系",
-                        "2":"核查A公司口头辞退张三是否违反劳动法第39条"}}
+技术栈: Pydantic v2 (BaseModel/Field/validator) / 图算法 (拓扑排序)
 """
 from typing import List, Dict, Optional, Set
 from pydantic import BaseModel, Field, validator
 
 
 class DAGNode(BaseModel):
-    """S_q 中的一个抽象任务节点"""
-    id: str = Field(..., description="节点唯一标识，如 '1', '2a'")
-    abstract: str = Field(..., description="抽象任务描述，不包含具体实体名称")
-    deps: List[str] = Field(default_factory=list, description="依赖的前置节点 ID 列表")
+    """S_q 里的一步：要做什么事（抽象版），以及得等哪些前置步骤完成"""
+    id: str = Field(..., description="节点编号")
+    abstract: str = Field(..., description="抽象任务，不提具体人名公司名")
+    deps: List[str] = Field(default_factory=list, description="依赖的前置节点 id")
 
 
 class SkeletonGraph(BaseModel):

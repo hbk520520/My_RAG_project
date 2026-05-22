@@ -1,3 +1,11 @@
+"""
+Redis 状态管家 —— 让无状态的 Worker 能记住上下文
+=============================================
+每个会话的状态在 Worker 之间流转，靠 Redis 做"脱水"（内存→Redis）
+和"复水"（Redis→内存）。会话一小时不用自动过期。
+
+技术栈: redis (Redis 客户端)
+"""
 import json
 import redis
 from typing import Dict, Any, Optional

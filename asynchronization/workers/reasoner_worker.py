@@ -1,11 +1,13 @@
 """
-Reasoner Worker —— 基于检索事实进行逻辑推演并生成最终报告
-对应 soul.py 中 AgenticNodesOperator.reason() + generate_final_report() 的角色
+Reasoner Worker —— 最后一棒：把收集到的事实串成法律意见
+=====================================================
+前面几棒把事实都查齐了，这里用 Reasoner 模型对每个子任务做逻辑推演，
+然后 Generator 综合所有推理链写出最终法律意见书。
+如果涉及金额计算，标记 needs_sandbox_calc 让下一环节走沙箱。
+
+技术栈: Kafka / Redis / DeepSeek API
 """
-import sys
-import os
-import json
-import logging
+import sys, os, json, logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

@@ -1,8 +1,12 @@
-import docker
-import requests
-import time
-import uuid
-import logging
+"""
+Docker 沙箱调度器 —— 创建/使用/销毁隔离执行环境
+=============================================
+每个会话一个容器，内存上限 512MB、CPU 0.5 核、网络完全断开。
+闲置 10 分钟自动回收，防止资源泄漏。
+
+技术栈: docker (Python SDK) / uuid / requests
+"""
+import docker, requests, time, uuid, logging
 
 logger = logging.getLogger("SandboxScheduler")
 

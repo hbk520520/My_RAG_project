@@ -1,21 +1,20 @@
 """
-可观测性模块 —— 结构化日志、Metrics、健康检查
+可观测性 —— 系统运行时不能"盲飞"
+=============================
+提供 JSON 结构化日志、Prometheus 风格的 Metrics 内存收集器、
+HTTP 健康检查端点、LLM 调用的指数退避重试、以及本地 Dead Letter Queue。
+
+技术栈: http.server / threading / openai (ResilientLLMClient) / collections
 """
-import time
-import json
-import logging
-import threading
+import time, json, logging, threading
 from typing import Dict, Any, Optional
 from datetime import datetime
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
-# ============================================================================
-# 结构化 JSON 日志
-# ============================================================================
+# ---- JSON 格式日志，方便 ELK/Loki 直接吃进去 ----
 class JsonFormatter(logging.Formatter):
-    """JSON 格式日志输出，方便 ELK/Loki 采集"""
 
     def format(self, record: logging.LogRecord) -> str:
         log_entry = {

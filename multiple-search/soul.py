@@ -1,8 +1,15 @@
-import os
-import json
-import time
-import operator
-import logging
+"""
+智能体引擎 —— 整个系统的大脑 (LangGraph 状态机)
+============================================
+这里不是简单的顺序调用，而是一个有限状态机：Planner 拆任务 → Executor 逐个执行
+→ Grader 判断够不够 → Replanner 救场 → Generate 出报告 → 沙箱算钱。
+
+所有节点通过 LangGraph 的 StateGraph 编排，条件路由自动决定下一步走哪。
+沙箱闭环的五步（写代码→执行→注入结果→清理）也在这里。
+
+技术栈: LangGraph (StateGraph/END) / igraph / FAISS / Pydantic / DeepSeek API
+"""
+import os, json, time, operator, logging
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 from pydantic import BaseModel, ValidationError
 from openai import OpenAI

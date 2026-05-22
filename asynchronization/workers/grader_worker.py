@@ -1,11 +1,13 @@
 """
-Grader Worker —— 评估检索结果的信息充分性
-对应 soul.py 中 AgenticNodesOperator.grade_facts() 的角色
+Grader Worker —— 第三棒：翻完资料了，够不够用？
+===========================================
+拿到 Retriever 找回来的文档，调 Grader 模型判断能不能回答当前子任务：
+够 → 转 Reasoner；不够但还能补 → 追加检索词回 Retriever；
+完全无关 → 计数，超过阈值就喊 Replanner 来救场。
+
+技术栈: Kafka / Redis / DeepSeek API (JSON mode)
 """
-import sys
-import os
-import json
-import logging
+import sys, os, json, logging
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 

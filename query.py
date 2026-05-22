@@ -1,3 +1,11 @@
+"""
+入口路由层 —— 整个系统的"前台接待"
+=============================
+每一条用户消息都先经过这里。不用大模型，只用正则和一个小分类器判断意图，
+闲聊就礼貌回复，简单问题走 RAG，复杂案情才唤醒后面的 Agent 引擎。
+
+技术栈: scikit-learn (LogisticRegression) / sentence-transformers / re
+"""
 import re
 import time
 import json
@@ -7,26 +15,22 @@ from typing import Dict, Tuple, Any
 from sklearn.linear_model import LogisticRegression
 from sentence_transformers import SentenceTransformer
 
-# ==========================================
-# 全局配置
-# ==========================================
-BGE_MODEL_PATH = "./RAG_data/bge-legal-v1"          # 你的嵌入模型路径
-COMPLEX_SEMANTIC_THRESHOLD = 0.40                   # 语义分类器复杂概率阈值
-COMPLEX_LENGTH_THRESHOLD = 80                       # 字符数超过直接视为复杂
+# ---- 路由阈值，低于这个数就走简单路径 ----
+BGE_MODEL_PATH = "./RAG_data/bge-legal-v1"
+COMPLEX_SEMANTIC_THRESHOLD = 0.40
+COMPLEX_LENGTH_THRESHOLD = 80
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger("UnifiedRouter")
 
-# ==========================================
-# 统一智能路由网关 (query.py 专用)
-# ==========================================
+# ---- 统一智能路由网关 (query.py 专用，与 soul.py 的缓存包装器配对) ----
 class UnifiedQueryRouter_Query:
     def __init__(self):
-        logger.info("加载嵌入模型与语义分类器...")
+        logger.info("正在把嵌入模型和分类器加载进显存...")
         self.embedder = SentenceTransformer(BGE_MODEL_PATH, device='cuda')
         self.classifier = LogisticRegression(class_weight='balanced')
 
-        # ---------- L0 正则引擎 ----------
+        # L0 层：零成本正则 —— 闲聊、法条、简单句式直接拦截
         self.greetings = re.compile(
             r'^(你好|在吗|哈喽|hello|hi|嗨|你是谁|谢谢|拜拜|再见|早安|晚安)[！。？~\s]*$',
             re.IGNORECASE
@@ -36,11 +40,11 @@ class UnifiedQueryRouter_Query:
             r"^(什么是|解释一下|告诉我|.*的概念|.*的定义是|.*出台时间是|.*?属于什么法)[\?？\s]*$"
         )
 
-        # 冷启动训练一个简单的语义分类器（模拟你已有的逻辑）
+        # 用几条手工标注的样本热一下分类器，后面靠真实数据持续更新
         self._train_semantic_classifier()
 
     def _train_semantic_classifier(self):
-        """用少量示例训练一个『简单-复杂』二分类器"""
+        """给语义分类器喂几条种子样本，让它知道简单和复杂大概长什么样"""
         dummy_queries = [
             ("故意杀人罪判几年", 0),
             ("劳动法赔偿标准是什么", 0),
@@ -51,7 +55,7 @@ class UnifiedQueryRouter_Query:
         texts, labels = zip(*dummy_queries)
         vectors = self.embedder.encode(list(texts), normalize_embeddings=True)
         self.classifier.fit(vectors, labels)
-        logger.info("语义分类器冷启动完成。")
+        logger.info("分类器种子训练完了，可以用了。")
 
     # ==========================================================
     # L2 兜底：LLM 裁决（这里用模拟实现，生产环境替换为 API 调用）

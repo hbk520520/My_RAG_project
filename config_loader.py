@@ -1,5 +1,10 @@
 """
-统一配置加载器 —— 所有模块的唯一配置入口
+配置中心 —— 整个项目只有一个地方改参数
+================================
+从 config.yaml 读配置，支持 ${ENV_VAR} 替换敏感信息。
+全局单例，所有模块通过 cfg.get("llm", "api_key") 这种点号路径拿值。
+
+技术栈: PyYAML / re (环境变量替换) / pathlib
 """
 import os
 import re
@@ -9,7 +14,7 @@ from pathlib import Path
 
 
 class Config:
-    """线程安全的单例配置管理器"""
+    """单例配置，进程里只加载一次"""
 
     _instance = None
     _data: Dict[str, Any] = {}

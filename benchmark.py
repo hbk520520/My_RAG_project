@@ -1,3 +1,11 @@
+"""
+评测层 —— 用量化指标逼出系统的真实水平
+===================================
+不等系统自己说"我很强"，而是用 HR@K、MRR、轨迹裁判和 Graph-NIAH 四把尺子量清楚。
+检索好不好、推理链对不对、多跳能不能穿过去，这里一次跑完出分。
+
+技术栈: DeepSeek API (裁判模型) / numpy / dataclasses / openai
+"""
 import json
 import time
 import logging
@@ -6,13 +14,10 @@ from typing import List, Dict, Any, Tuple, Optional, Callable
 from dataclasses import dataclass
 from collections import defaultdict
 
-import openai  # DeepSeek API 兼容 OpenAI 接口
+import openai
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LegalBenchmark")
-
-# ============================================================================
-# 0. 配置 DeepSeek 裁判模型
 # ============================================================================
 DEEPSEEK_API_KEY = "your-deepseek-api-key"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"

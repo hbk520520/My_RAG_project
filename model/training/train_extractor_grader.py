@@ -1,9 +1,11 @@
 """
-train_extractor_grader.py —— Extractor + Grader DPO 训练
-=========================================================
-模型：Qwen2.5-3B-Instruct + LoRA
-算法：DPO (直接偏好优化)，两阶段训练
-数据：Evol-Instruct 生成的 extractor_pairs.jsonl
+Extractor + Grader 训练 —— DPO 对齐，教模型"别脑补"
+=================================================
+chosen 是谨慎的、基于事实的回答；rejected 是武断的、靠猜测的结论。
+DPO 让模型学会：不确定就说"需要补充信息"，而不是拍脑袋说"肯定违法"。
+3B 小模型就够用。
+
+技术栈: DPOTrainer (trl) / Unsloth / LoRA
 """
 import os
 import sys

@@ -1,5 +1,16 @@
-import time
-import logging
+"""
+法律稠密图引擎 —— 知识的结构化仓库
+===============================
+用 BGE-M3 把每条法条/案例编成稠密+稀疏双向量，存进 FAISS-HNSW 做毫秒级检索，
+用 igraph 管理节点间的语义边。新知识入库自动连边，旧法条可软删除并级联标记脏摘要。
+
+核心思路：
+  混合相似度 = α × 余弦 + (1-α) × BM25（兼顾语义和字面）
+  检索走 HNSW 近似近邻，建边走阈值筛选，日常增量维护靠 tombstone 和夜间重算。
+
+技术栈: FlagEmbedding (BGE-M3) / FAISS (HNSW) / igraph / numpy
+"""
+import time, logging
 import numpy as np
 import faiss
 import igraph as ig

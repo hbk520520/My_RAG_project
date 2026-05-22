@@ -1,18 +1,12 @@
 """
-Evol-Instruct 数据工厂 —— 基于法律锚点反向出题
-==============================================
-用途：从真实法条/判决书生成训练数据
-产出：
-  - planner_trajectories.jsonl   (Meta-Planner SFT 数据)
-  - extractor_pairs.jsonl        (Extractor/Grader DPO 数据)
-  - reasoner_qa.jsonl            (Reasoner SFT 数据)
-  - replanner_scenarios.jsonl    (Replanner GRPO 场景)
+Evol-Instruct 数据工厂 —— 用大模型造训练数据
+==========================================
+从真实法条反向出题：虚构具体案件→生成 Planner 步骤→提取关键事实→附带计算代码。
+同时能注入口语化噪声和故意信息残缺，造出逼真的用户提问当测试集。
 
-详见: training_data_guide.py
+技术栈: DeepSeek API (AsyncOpenAI) / JSON mode / asyncio
 """
-import json
-import asyncio
-import logging
+import json, asyncio, logging
 from typing import List, Dict, Optional
 from openai import AsyncOpenAI
 

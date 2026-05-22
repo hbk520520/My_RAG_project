@@ -1,6 +1,12 @@
-import sys
-import io
-import traceback
+"""
+沙箱执行服务 —— Docker 里的 Python 解释器
+=======================================
+跑在断网的容器里，接代码→执行→返回结果。persistent_globals 保证多次执行共享变量，
+适合"写完代码→执行→拿到 result 变量→继续"的有状态场景。
+
+技术栈: FastAPI / uvicorn / io (stdout 捕获)
+"""
+import sys, io, traceback
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn

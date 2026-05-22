@@ -1,15 +1,15 @@
 """
-增量记忆注入与动态挂载引擎 (GMM‑based Memory Sniffer)
-=====================================================
-仿生学记忆整合：利用一维高斯混合模型动态决定新知识挂载阈值，
-配合脏传播与夜间清算，实现法律知识库的高频热更新，避免全量重聚类。
+增量记忆注入引擎 —— 新知识来了不用全量重建
+========================================
+用一维高斯混合模型 (GMM) 动态决定新知识该挂到哪些簇上，
+挂载后向上级联标记脏摘要，等夜间无人时统一重算。
 
-核心组件：
-- DynamicThresholder：GMM 自适应分界
-- TreeMounter：拓扑挂载 + 脏标记级联
-- NightlyRewriter：异步摘要重写 (模拟)
+核心思路：
+  仿生学记忆整合 —— 新信息不需要重新整理整个记忆库，
+  找到最相关的那几个簇挂上去就行，被影响的上层摘要标记"需要重写"。
+
+技术栈: sklearn (GaussianMixture) / numpy / 模拟图数据库
 """
-
 import numpy as np
 from sklearn.mixture import GaussianMixture
 from typing import List, Tuple, Dict, Set

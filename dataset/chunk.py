@@ -1,5 +1,13 @@
+"""
+文本分块 —— 把 PDF 拆成语义完整的片段
+==================================
+不做粗暴的定长切割，而是按段落/句子自然边界分块。
+太短的向上合并，保证每一块都有独立可读的语义。
+
+技术栈: PyMuPDF (fitz) / re
+"""
 import re
-import fitz  # PyMuPDF
+import fitz
 from typing import List, Optional
 
 def extract_text_from_pdf(pdf_path: str) -> str:

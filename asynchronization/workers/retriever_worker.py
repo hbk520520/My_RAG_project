@@ -1,12 +1,21 @@
-import sys
-sys.path.append("../../")
+"""
+Retriever Worker —— 第二棒：带着子任务去图引擎里找答案
+===================================================
+从 Redis 拿到当前会话的任务队列，取队头子任务，调用图引擎的 HNSW 检索，
+把找到的文档放进 past_observations，然后交给 Grader 评判质量。
+兼容旧字符串格式和 v2 的 Dict 格式 (task_desc + engine)。
 
-from infrastructure.state_manager import StateManager
-from infrastructure.kafka_utils import (
+技术栈: Kafka / Redis / FAISS-HNSW / BGE-M3
+"""
+import sys, os, logging
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config_loader import cfg
+from state_manager import StateManager
+from kafka_utils import (
     create_consumer, create_producer,
-    TOPIC_RETRIEVER_PENDING, TOPIC_GRADER_PENDING
+    TOPIC_RETRIEVER_PENDING, TOPIC_GRADER_PENDING, TOPIC_REASONER_PENDING
 )
-from legal_graph_engine import LegalDenseGraphBuilder   # 你的图引擎
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RetrieverWorker")

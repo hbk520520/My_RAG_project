@@ -1,13 +1,12 @@
 """
-Unsloth 通用模型加载器 —— 所有训练脚本的统一入口
-==================================================
-提供 Loader 类，支持：
-  - 4-bit QLoRA 极速加载
-  - 按模型类型配置 LoRA 参数
-  - 统一对话模板格式化
+Unsloth 加载器 —— 一张卡也能微调大模型
+===================================
+4-bit QLoRA 把 14B 模型压到不到 5GB，All-Linear LoRA 挂载，
+按模型类型预配 r/alpha 参数。保存只存 LoRA 增量，不存基座。
+
+技术栈: unsloth (FastLanguageModel) / peft (LoRA) / transformers
 """
-import os
-import sys
+import os, sys
 from typing import Tuple, Optional, List
 from unsloth import FastLanguageModel
 
