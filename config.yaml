@@ -7,6 +7,7 @@ llm:
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "https://api.deepseek.com"
   judge_model: "deepseek-chat"
+  backend: "auto"              # "vllm" / "api" / "auto"
   temperature_plan: 0.1
   temperature_extract: 0.1
   temperature_reason: 0.1
@@ -14,6 +15,17 @@ llm:
   temperature_judge: 0.0
   max_tokens_default: 2048
   max_tokens_judge: 512
+
+# --- VLLM 自部署推理 (用自己的模型) ---
+vllm:
+  base_model: "Qwen/Qwen2.5-14B-Instruct"
+  gpu_memory_utilization: 0.85
+  enable_prefix_caching: true    # VLLM 自动 KV-cache 复用，同一个 system prompt 不重复算
+  lora_modules:
+    planner: "./saved_loras/planner_lora"
+    replanner: "./saved_loras/replanner_grpo"
+    extractor: "./saved_loras/extractor_grader_dpo"
+    reasoner: "./saved_loras/reasoner_sft"
 
 # --- 向量模型 ---
 embedding:

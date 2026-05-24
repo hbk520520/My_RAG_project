@@ -6,7 +6,7 @@
 
 ```
 .
-├── config.yaml                    # 🆕 统一配置中心
+├── config.yaml                    # 🆕 统一配置中心 (含VLLM自部署配置)
 ├── config_loader.py               # 🆕 配置加载器 (${ENV_VAR} 替换)
 ├── prompts.py                     # 🆕 Prompt 模板库 (11种场景)
 ├── observability.py               # 🆕 可观测性 (Metrics/健康检查/DLQ/指数退避)
@@ -55,7 +55,8 @@
     │   ├── train_reasoner.py      # Reasoner 长上下文 SFT
     │   └── train_retriever.py     # BGE-M3 LoRA 微调
     └── utils/
-        └── unsloth_loader.py      # 🆕 Unsloth 通用加载器
+        ├── unsloth_loader.py      # 🆕 Unsloth 通用加载器
+        └── vllm_engine.py         # 🆕 VLLM 自部署推理 (prefix caching)
 ```
 
 ## 数据流
@@ -131,6 +132,8 @@
 
 本模块旨在解决复杂的法律/垂直领域问题。为了前置降低运行成本，在核心模块启动前，加入了**分类器、正则化匹配**与 **Prompt 缓存**。
 
+> **关于 Prompt 缓存**：这不是简单的 Q&A 查表（那是 SemanticCache 做的事），而是指在自部署 VLLM 推理时，同一个 system prompt 的 KV-cache 只计算一次，后续所有请求共享——同一个 prompt 模板反复用，GPU 不用重复算 attention。详见下面的「VLLM 自部署推理引擎」章节。
+
 ### （1）四大核心模型矩阵 (Agent Roles)
 1. 🧠 **Meta-planner（元规划器）**：负责为原问题生成一个抽象的推理骨架。
 2. 🔄 **Replaner（重规划器）**：当查询不到目标信息时，负责修改和重写流程。
@@ -170,6 +173,14 @@
 * **禁忌点**：**不能使用三个完全不同的独立大模型**。否则会面临微调训练成本过高、且不同模型间语义流形（Semantic Manifold）不对齐的问题。
 * **正确做法**：换成一个**通用的大模型基座 + 挂靠 3 个不同的 LoRA 模块**，并统一使用 **vLLM** 作为底层推理加速引擎。
 
+#### 🔧 VLLM 自部署推理引擎 (`model/utils/vllm_engine.py`)
+
+这才是 README 开头提到的 **"Prompt 缓存"** 的真正实现：
+
+* **不是 API 调用**：把训练好的 LoRA 权重复用起来，一个 Qwen2.5-14B 基座 + 4 个 LoRA（Planner / Replanner / Extractor / Reasoner），全部跑在自己 GPU 上。
+* **VLLM 自动前缀缓存 (`enable_prefix_caching=True`)**：每个模型的 system prompt 是固定的（比如 Planner 始终以"你是法律案件拆解专家"开头）。VLLM 在第一次推理时算出这段 prompt 的 KV-cache，后续同一个 LoRA 发出的请求直接复用，跳过了 system prompt 的 attention 计算——相当于一段固定前缀只计费一次。
+* **无缝切换**：`create_llm_backend("auto")` 先尝试启动 VLLM，显存不够或没装 vllm 库就自动退回 DeepSeek API。上游代码不需要感知底层用的是什么。
+
 ---
 
 ## 3. 模型训练策略 (Training Pipeline)
@@ -204,6 +215,11 @@
 
 ## 4. 成本与安全管控 (Cost & Safety)
 
+* **VLLM 自部署推理 + 前缀缓存**：
+    * **是什么**：用自己微调好的 14B 模型 + LoRA 做推理，不再每次调用都走 API。
+    * **省钱的核心叫前缀缓存（VLLM `enable_prefix_caching`）**：同一个模型反复收到同样的 system prompt 开头时，VLLM 自动复用之前算好的 KV-cache，不重复计算固定前缀的 attention——这就解释了 README 开头提到的"Prompt 缓存"到底是怎么落的代码。
+    * **双模式兜底**：`model/utils/vllm_engine.py` 提供了 `create_llm_backend()` 工厂函数，先试着连本地的 VLLM 实例，连不上或显存不够就自动切 DeepSeek API，上游调用方无感知。
+    * **怎么启用**：在 `config.yaml` 里设 `llm.backend: "vllm"`，然后确保 `saved_loras/` 下有四个 LoRA 目录即可。训练产出的权重能直接挂上去用，不需要额外转换。
 * **Summary 生成成本控制**：最开始关于 Summary 节点的自然语言总结内容，选择在**图结构整体构建完成后**再去集中生成。这样可以大幅减少中间调用的频率。通过使用 DeepSeek 的超低价 API，**构建十分之一的数据最终仅仅花费了 7 块钱**。因此，原本计划单独训练一个总结模型的方案直接被砍掉，改用商业 API 降维打击。
 * **计算沙盒与代码注入防御**：
     * **禁忌点**：在计算类似“税率、赔偿金”等强数值问题时，**绝对不能让 LLM 直接生成数字答案**（极易出错）。
