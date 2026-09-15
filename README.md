@@ -2,6 +2,8 @@
 
 > 从基础 RAG 演进为 Plan-and-Replan 法律智能体系统
 
+📄 **完整项目介绍（技术选型 / 分层架构 / 整体规划 / 训练与评测 / 工程化现状）：见 [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)**
+
 ## 项目结构
 
 ```
@@ -59,6 +61,31 @@
         └── vllm_engine.py         # 🆕 VLLM 自部署推理 (prefix caching)
 ```
 
+## 快速开始
+
+```bash
+pip install -r requirements.txt          # 运行时依赖
+pip install -r requirements-dev.txt      # 追加测试依赖（pytest）
+pip install -r requirements-train.txt    # 训练 / GPU 侧（unsloth / vllm）
+
+cp .env.example .env                     # 填入 DEEPSEEK_API_KEY 等
+python -m pytest                         # 187 个单元/集成测试，全部离线可跑
+```
+
+四个可以直接跑的离线示例（**不联网、不下载模型**）：
+
+```bash
+python -m pytest
+python multiple-search/soul.py                  # LangGraph 全链路（Mock AgenticOps）
+python dataset/graph.py                         # 图引擎：建图/删除/摘要重算/最大值截断
+python dataset/IncrementalMemoryManager.py      # GMM 动态阈值 + 新簇创建
+python dataset/memory_graph_bridge.py           # GMM ↔ 图引擎双写
+```
+
+> 离线示例的秘诀是 `dataset/graph.py` 里的 `StubEncoder` / `make_offline_engine()`：
+> 注入一个「同文本必得同向量」的假编码器，从而完全绕开 BGE-M3（约 2GB）下载。
+> 生产路径仍然用 `BGEM3FlagModel`，只在真正需要编码时才懒加载。
+
 ## 数据流
 
 ```
@@ -69,6 +96,39 @@
                 → LangGraph: L0_Gateway → Planner → Executor → Grader
                 → Replanner (失败→虫洞) → Generate → WriteCode → ExecuteCode(沙箱)
 ```
+
+---
+
+## 更新日志 (2026-09-14：缺陷修复与工程化)
+
+| 阶段 | 内容 |
+|---|---|
+| 0 止血 | 修掉 2 处语法错误（`grader_worker.py` dict 重复、`dataset/graph.py` 函数头）|
+| 1 依赖/启动 | 新增 `requirements*.txt`；`entrypoint.sh` 路径修正；`Dockerfile.worker` COPY 源修正；`planer-worker.py`→`planner_worker.py` |
+| 2 配置收敛 | 删掉散落的硬编码阈值/假 Key；全部改读 `config.yaml` 的 `from_config()` |
+| 3 Prompt 单一真源 | `prompts.py` 扩到 13 模板 + 10 构造器；`double_layer_plan.plan_steps_from_raw()` 统一解析 |
+| 4 图引擎合并 | 重复的 `LegalDenseGraphBuilder` 合并为一份；维度统一 1024；补全空实现 |
+| 5 打通两条链路 | 新增 `replanner_rules.py`、`sandbox_exec.py`；**Retriever 不再 pop 队列**（修掉队列错位）；沙箱容器不再泄漏 |
+| 6 健壮性 | GMM 三处兜底；benchmark 检索去重；DLQ + `quarantine_message` 毒消息隔离 |
+| 7 清理 | 删 `model/train/` 5 份损坏草稿与 2 个连字符脚本；删死代码 `call_deepseek_planner` |
+| 8 测试 | `tests/` 156 个用例；修掉"首个叶子没挂到根簇"与"沙箱内无异常类"两处缺陷 |
+| 9 向量一致性 | `graph.add_node()` 新增 `dense`/`sparse` 参数；桥接器透传同一次编码结果 → **同一节点不再可能存成两个向量**，并省掉一次重复编码 |
+| 10 清技术债 | igraph 顶点名统一 `str(int)`（29 个触点）；Pydantic **V1 风格 `@validator` 迁移到 `@field_validator`**；修掉 `bootstrap_from_graph` 三处 ID 空间错误 |
+
+> 阶段 9 解决的问题：`MemoryGraphBridge.embedding_fn` 的输出原先**只**喂 GMM，
+> 图引擎那边由 `add_node()` 用自己的编码器重新算一遍 —— 两者不一致时**不报错**，
+> 同一个节点静默分叉成两个不同空间的向量。现在桥接器把同一次编码的
+> `dense`/`sparse` 一并透传下去，且通过 `_check_dim` 做维度校验；
+> 自定义 `embedding_fn` 若不提供稀疏权重，会打 WARNING 而不是静默降级。
+
+> 阶段 10 解决的问题：本项目原先把 **int** 节点 ID 直接当 igraph 顶点名。
+> 除每次 `add_vertex` 都打 `DeprecationWarning`（未来版本将禁止）外，还有个更隐蔽的
+> 隐患：`build_initial_graph_batch` 的顶点名类型**由语料决定**，语料给字符串 ID 时
+> 就会与增量 `add_node()` 产生的 int 名混用 —— 实测混用后 `vs.find(name=...)` 抛
+> `ValueError`，而所有调用点都 `except ValueError: continue`，于是**静默漏节点**。
+> 现在约定「图内顶点名恒为 `str(int)`，内部逻辑仍用 int」，边界转换只有
+> `dataset/graph.py` 的 `vname()` / `as_num_id()` 两个函数，并由
+> `tests/test_graph_vertex_names.py`（31 例）锁定契约。
 
 ## 更新日志 (2026-05-21)
 

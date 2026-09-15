@@ -8,7 +8,11 @@ C_q 把抽象的节点映射到当前案件的具体查询。
 技术栈: Pydantic v2 (BaseModel/Field/validator) / 图算法 (拓扑排序)
 """
 from typing import List, Dict, Optional, Set
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
+
+# 阶段 10：原先用的是 Pydantic V1 风格的 `@validator`，V2 起已废弃、V3 将移除。
+# 现已迁移到 `@field_validator`（默认 mode="after"，与 V1 的校验时机一致，
+# 因此 DAG 环检测拿到的仍是已经解析成 List[DAGNode] 的对象）。
 
 
 class DAGNode(BaseModel):
@@ -22,7 +26,8 @@ class SkeletonGraph(BaseModel):
     """S_q：抽象推理骨架 DAG"""
     nodes: List[DAGNode] = Field(..., description="DAG 中的所有任务节点")
 
-    @validator("nodes")
+    @field_validator("nodes")
+    @classmethod
     def validate_dag(cls, nodes: List[DAGNode]) -> List[DAGNode]:
         """验证无环 + 依赖节点存在"""
         node_ids = {n.id for n in nodes}
@@ -156,3 +161,50 @@ def parse_double_layer_plan(raw_json: dict) -> DoubleLayerPlan:
 
     # 格式3: 空
     raise ValueError(f"无法解析双层蓝图: {list(raw_json.keys())}")
+
+
+def plan_steps_from_raw(raw_json: dict) -> List[str]:
+    """
+    从任意历史格式中提取"步骤描述"列表（阶段 3 新增）。
+
+    背景：训练侧（SemanticDTW 过滤、数据校验）与评测侧长期各自解析格式。
+    Planner 改成双层蓝图后，这些地方仍按旧的 `task_queue` 读取，
+    结果是**静默筛掉全部样本**而不报错。这里提供唯一的兼容入口：
+
+      1. 双层蓝图 {"skeleton": {...}, "concretion": {...}}
+         -> 按拓扑序返回 concretions（缺失则退回 abstract）
+      2. 旧扁平 {"task_queue": ["步骤1", ...]} 或 {"task_queue": [{...}]}
+         -> 返回其中的描述文本
+      3. {"strategy_queue": [...]}
+         -> 返回其中的文本
+
+    :raises ValueError: 三种格式都不匹配
+    """
+    if not isinstance(raw_json, dict):
+        raise ValueError(f"期望 dict，实际是 {type(raw_json).__name__}")
+
+    # ---- 格式1：双层蓝图（当前标准）----
+    if "skeleton" in raw_json or "concretion" in raw_json:
+        plan = parse_double_layer_plan(raw_json)
+        steps = []
+        for nid in plan.skeleton.topological_order():
+            text = plan.concretion.concretions.get(nid) or plan._abstract_of(nid)
+            if text:
+                steps.append(text)
+        return steps
+
+    # ---- 格式2：旧扁平 task_queue ----
+    if "task_queue" in raw_json:
+        steps = []
+        for t in raw_json["task_queue"]:
+            if isinstance(t, dict):
+                steps.append(t.get("task_desc") or t.get("task") or str(t))
+            else:
+                steps.append(str(t))
+        return steps
+
+    # ---- 格式3：strategy_queue ----
+    if "strategy_queue" in raw_json:
+        return [str(t) for t in raw_json["strategy_queue"]]
+
+    raise ValueError(f"无法从以下字段提取步骤: {list(raw_json.keys())}")

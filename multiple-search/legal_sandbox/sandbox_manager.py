@@ -6,16 +6,46 @@ Docker 沙箱调度器 —— 创建/使用/销毁隔离执行环境
 
 技术栈: docker (Python SDK) / uuid / requests
 """
+import os, sys
 import docker, requests, time, uuid, logging
+
+# 允许从任意 cwd 导入根目录模块（config_loader）
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+try:
+    from config_loader import cfg
+except Exception:  # 沙箱镜像内可能没有 config_loader，此时退回内置默认值
+    cfg = None
 
 logger = logging.getLogger("SandboxScheduler")
 
-class DockerSandboxManager:
-    """管理有状态 Docker 沙箱的生命周期与代码执行"""
 
-    def __init__(self, image_name: str = "legal-sandbox:v1"):
+def _cfg_get(*keys, default=None):
+    """带兜底的配置读取：脱离 config.yaml 运行时用内置默认值"""
+    if cfg is None:
+        return default
+    return cfg.get(*keys, default=default)
+
+
+class DockerSandboxManager:
+    """管理有状态 Docker 沙箱的生命周期与代码执行
+
+    阶段 2：镜像名、内存/CPU 限额、网络模式、执行超时、闲置回收时间
+    全部改读 config.yaml 的 sandbox 段（原先硬编码在方法体里，
+    改一个限额必须动代码）。
+    """
+
+    def __init__(self, image_name: str = None):
         self.client = docker.from_env()
-        self.image_name = image_name
+        # ---- 阶段 2：配置化 ----
+        self.image_name = image_name or _cfg_get("sandbox", "image", default="legal-sandbox:v1")
+        self.mem_limit = _cfg_get("sandbox", "mem_limit", default="512m")
+        self.cpu_quota = _cfg_get("sandbox", "cpu_quota", default=50000)
+        self.network_mode = _cfg_get("sandbox", "network_mode", default="none")
+        self.execution_timeout = _cfg_get("sandbox", "execution_timeout", default=10)
+        self.idle_cleanup_seconds = _cfg_get("sandbox", "idle_cleanup_seconds", default=600)
         # 记录 session_id -> 容器元数据
         self.active_containers = {}
 
@@ -29,10 +59,10 @@ class DockerSandboxManager:
                 image=self.image_name,
                 name=session_id,
                 detach=True,
-                # 安全防线
-                mem_limit="512m",
-                cpu_quota=50000,       # 最多占用 0.5 个核心
-                network_mode="none",   # 完全断网
+                # 安全防线（阶段 2：限额来自 config.yaml 的 sandbox 段）
+                mem_limit=self.mem_limit,
+                cpu_quota=self.cpu_quota,          # 最多占用 0.5 个核心
+                network_mode=self.network_mode,    # 完全断网
                 security_opt=["no-new-privileges:true"],
                 ports={'8000/tcp': None}  # 随机映射宿主机端口
             )
@@ -73,27 +103,44 @@ class DockerSandboxManager:
         meta["last_active"] = time.time()
 
         try:
-            resp = requests.post(meta["url"], json={"code": code}, timeout=10)
+            resp = requests.post(meta["url"], json={"code": code},
+                                 timeout=self.execution_timeout)
             return resp.json()
         except requests.Timeout:
-            return {"output": "", "error": "Execution Timeout (>10s)"}
+            return {"output": "", "error": f"Execution Timeout (>{self.execution_timeout}s)"}
         except Exception as e:
             return {"output": "", "error": f"Sandbox communication error: {str(e)}"}
 
     def destroy_session(self, session_id: str):
-        """销毁沙箱容器，释放资源"""
-        if session_id in self.active_containers:
-            logger.info(f"销毁沙箱: {session_id}")
-            container = self.active_containers[session_id]["container"]
-            try:
-                container.remove(force=True)
-            except Exception as e:
-                logger.error(f"销毁沙箱 {session_id} 时出错: {e}")
-            finally:
-                del self.active_containers[session_id]
+        """
+        销毁沙箱容器，释放资源。
 
-    def cleanup_idle(self, max_idle_seconds: int = 600):
+        阶段 5 修复：原先只查 self.active_containers，而调用方（soul.py 的
+        node_cleanup_sandbox、reasoner_worker）每次都会 **新建** manager 实例，
+        新实例的 active_containers 是空的 —— 于是 destroy_session 静默什么都不做，
+        容器只增不减（泄漏）。
+        这里增加兜底：容器名就是 session_id，可以直接按名字找回并强制删除。
+        """
+        meta = self.active_containers.pop(session_id, None)
+        container = meta["container"] if meta else None
+
+        if container is None:
+            try:
+                container = self.client.containers.get(session_id)
+            except Exception:
+                logger.info(f"沙箱 {session_id} 不存在或已销毁，无需清理")
+                return
+
+        try:
+            container.remove(force=True)
+            logger.info(f"沙箱 {session_id} 已销毁")
+        except Exception as e:
+            logger.error(f"销毁沙箱 {session_id} 时出错: {e}")
+
+    def cleanup_idle(self, max_idle_seconds: int = None):
         """回收闲置超过指定秒数的容器（可放入后台守护线程）"""
+        if max_idle_seconds is None:
+            max_idle_seconds = self.idle_cleanup_seconds
         now = time.time()
         to_delete = []
         for sid, meta in self.active_containers.items():
@@ -101,3 +148,22 @@ class DockerSandboxManager:
                 to_delete.append(sid)
         for sid in to_delete:
             self.destroy_session(sid)
+
+
+# ============================================================================
+# 进程内单例（阶段 5 新增）
+# ============================================================================
+_default_manager = None
+
+
+def get_sandbox_manager() -> DockerSandboxManager:
+    """
+    获取进程内共享的沙箱调度器。
+
+    单例的意义：会话映射（active_containers）与 docker client 只建一次，
+    避免"每次调用 new 一个 manager、彼此看不到对方创建的会话"。
+    """
+    global _default_manager
+    if _default_manager is None:
+        _default_manager = DockerSandboxManager()
+    return _default_manager

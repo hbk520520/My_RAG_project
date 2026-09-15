@@ -1,0 +1,10 @@
+# ==========================================
+# 开发/测试依赖 —— 只有跑单元测试才需要
+# ==========================================
+# 安装：pip install -r requirements-dev.txt
+#
+# 注意：这些包**不需要**装进生产镜像（Dockerfile.worker 只装 requirements.txt）。
+
+-r requirements.txt
+
+pytest>=8.0

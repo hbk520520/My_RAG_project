@@ -324,6 +324,45 @@ class DeadLetterQueue:
 
 
 # ============================================================================
+# DLQ 便捷入口（阶段 6）
+# ----------------------------------------------------------------------------
+# 原先 DeadLetterQueue 定义好了却没有任何调用方 —— 失败消息实际上是被
+# `logger.error + consumer.commit()` 直接丢弃的。这里补上共享入口，
+# 由 Worker 的消息循环在捕获未处理异常时调用。
+# ============================================================================
+_dlq_singleton: Optional[DeadLetterQueue] = None
+
+
+def get_dlq(path: str = None) -> DeadLetterQueue:
+    """获取进程内共享的 DLQ（默认取 config.observability.dlq_path，即 ./dlq.jsonl）"""
+    global _dlq_singleton
+    if _dlq_singleton is None:
+        if path is None:
+            try:
+                from config_loader import cfg
+                path = cfg.get("observability", "dlq_path", default="./dlq.jsonl")
+            except Exception:
+                path = "./dlq.jsonl"
+        _dlq_singleton = DeadLetterQueue(path)
+    return _dlq_singleton
+
+
+def push_to_dlq(topic: str, key: str, value: dict, error: str) -> bool:
+    """
+    把处理失败的消息写入 DLQ。
+
+    刻意不让异常外溢：DLQ 自身故障不应该再把调用方（Worker 主循环）拖下水。
+    :return: 是否写入成功
+    """
+    try:
+        get_dlq().push(topic, key, value, error)
+        return True
+    except Exception as e:
+        logging.getLogger("dlq").error(f"DLQ 写入失败（消息已丢失）: {e}")
+        return False
+
+
+# ============================================================================
 # LLM 调用计时上下文管理器
 # ============================================================================
 class LLMTimer:

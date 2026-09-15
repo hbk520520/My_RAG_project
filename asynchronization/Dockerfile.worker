@@ -1,15 +1,29 @@
 FROM python:3.10-slim
 
+# 构建命令（在项目根目录执行，构建上下文必须是仓库根目录）：
+#   docker build -f asynchronization/Dockerfile.worker -t legal-agent-worker:latest .
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WORKER_TYPE=planner
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
 
-# 复制所有业务代码和基础设施
-COPY legal_graph_engine.py .
-COPY agentic_operators.py .
-COPY infrastructure/ infrastructure/
+# ---- 依赖层：单独 COPY 以复用构建缓存 ----
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 启动脚本（通过环境变量控制运行哪个 Worker）
-COPY entrypoint.sh .
-RUN chmod +x entrypoint.sh
-ENTRYPOINT ["./entrypoint.sh"]
+# ---- 业务代码层 ----
+# 根目录模块：config_loader 读 config.yaml，worker 依赖 double_layer_plan / prompts
+COPY config.yaml config_loader.py prompts.py double_layer_plan.py observability.py ./
+# 异步编排层（含 entrypoint.sh 与 workers/）
+COPY asynchronization/ asynchronization/
+RUN chmod +x asynchronization/entrypoint.sh
+
+# 说明：这里暂以 root 运行，因为沙箱调度需要挂载 docker.sock。
+# 阶段 6 会细化：改用非 root 用户 + docker 组，并配合 k8s securityContext。
+# 敏感信息（DEEPSEEK_API_KEY 等）在运行时由 k8s Secret / docker -e 注入，
+# 不要打进镜像。
+
+ENTRYPOINT ["/app/asynchronization/entrypoint.sh"]

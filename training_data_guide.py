@@ -40,9 +40,10 @@ DVC_PIPELINE_EXAMPLE = """
 # dvc.yaml
 stages:
   generate_planner_data:
-    cmd: python model/path-from-ds.py
+    cmd: python -m model.data.evol_instruct --out training_data/generated/planner_trajectories.jsonl
     deps:
-      - model/path-from-ds.py
+      - model/data/evol_instruct.py
+      - prompts.py
       - training_data/raw/verdicts/
     outs:
       - training_data/generated/planner_trajectories.jsonl
@@ -69,7 +70,12 @@ VALIDATION_CODE_EXAMPLE = '''
 """训练数据质量验证器"""
 import json
 import re
+import os, sys
 from typing import List, Dict
+
+# 阶段 3：需要 double_layer_plan 可导入，把项目根目录加入 sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+from double_layer_plan import plan_steps_from_raw
 
 class TrainingDataValidator:
     """验证 Evol-Instruct 生成的训练数据质量"""
@@ -89,15 +95,17 @@ class TrainingDataValidator:
 
                 assistant_msg = msgs[-1].get("content", "")
                 parsed = json.loads(assistant_msg)
-                task_queue = parsed.get("task_queue", [])
+                # 阶段 3：统一提取步骤，兼容双层蓝图 P_q={S_q,C_q}
+                # 与旧的扁平 task_queue / strategy_queue
+                plan_steps = plan_steps_from_raw(parsed)
 
-                if not task_queue:
+                if not plan_steps:
                     stats["empty_queue"] += 1
                     continue
-                if len(task_queue) > 8:
+                if len(plan_steps) > 8:
                     stats["too_many_steps"] += 1
                     continue
-                if any(len(t) < 3 for t in task_queue):
+                if any(len(t) < 3 for t in plan_steps):
                     stats["step_too_short"] += 1
                     continue
 
@@ -162,7 +170,10 @@ PIPELINE_RECOMMENDATION = """
   - Retriever MNR:     5000+ 个三元组 (query, pos, neg)
 """
 
-print("训练数据工程化建议已生成。")
-print(SUGGESTED_STRUCTURE)
-print(DVC_PIPELINE_EXAMPLE)
-print(PIPELINE_RECOMMENDATION)
+# 阶段 6：这些输出原先写在模块顶层，任何 `import training_data_guide` 都会
+# 往 stdout 打印一大段文本（污染日志、干扰测试）。改成只在直接运行时输出。
+if __name__ == "__main__":
+    print("训练数据工程化建议已生成。")
+    print(SUGGESTED_STRUCTURE)
+    print(DVC_PIPELINE_EXAMPLE)
+    print(PIPELINE_RECOMMENDATION)

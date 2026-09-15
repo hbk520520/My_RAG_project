@@ -6,6 +6,7 @@ Prompt 模板库 —— 所有 LLM 对话的"台词本"
 
 技术栈: 纯文本模板 / JSON Schema
 """
+import json
 from typing import List, Dict
 
 
@@ -37,6 +38,7 @@ META_PLANNER_SYSTEM = """你是一个顶级的中国法律案件拆解专家与�
   }
 }
 【deps 规则】：若步骤B依赖步骤A的结果才能执行，则在B的deps中填入A的id。无依赖填[]。
+【abstract 规则】：不包含具体人名/公司名/日期，用通用概念描述（例如把"《钢铁侠1》"抽象为"电影"）。
 """
 
 META_PLANNER_SIMPLE = """你是顶级法律案件拆解专家（Meta-Planner）。面对复杂法律问题，生成双层蓝图（抽象DAG + 具象化映射）。严格输出JSON: {"skeleton":{"nodes":[{"id":"1","abstract":"...","deps":[]}]},"concretion":{"concretions":{"1":"..."}}}"""
@@ -175,6 +177,209 @@ BENCHMARK_JUDGE_SYSTEM = """你是一个法律智能体轨迹裁判。请根据�
 
 
 # ============================================================================
+# 训练数据工厂：从法条反向出题（原先只存在于 model/data/evol_instruct.py）
+# ============================================================================
+SYNTHESIZE_GROUND_TRUTH_SYSTEM = """你是一个顶级的中国法律考试命题专家与数据标注工程师。
+我会给你几段真实的法律条款。你必须严格基于这些条款，进行"反向出题与解答"。
+
+【任务步骤】：
+1. 虚构一个极其具体的案件（包含具体的人物、入职时间、工资数额、冲突事件）。
+   案件必须刚好需要用到我提供的这些法律条款来解决。
+2. 生成解决这个案件的「双层蓝图」P_q = {S_q, C_q}（最多 4 步）。
+   - S_q (skeleton): 抽象推理骨架 DAG，abstract 字段不含具体人名/公司名/日期
+   - C_q (concretion): 将每个抽象节点实例化为针对本案件的具体查询
+3. 提取这个案件的关键事实要素（用于检验 Extractor）。
+4. 如果案件涉及赔偿金/经济补偿的计算，请写出一段纯 Python 代码来计算最终结果，
+   变量命名需清晰，且必须附带 `result = ...`。
+
+【输出约束】：
+严格输出以下 JSON 格式，不要包含任何 Markdown 代码块标签：
+{
+  "user_query": "虚构的用户提问...",
+  "ground_truth": {
+    "correct_planner_plan": {
+      "skeleton": {
+        "nodes": [
+          {"id": "1", "abstract": "核实劳动关系", "deps": []},
+          {"id": "2", "abstract": "核算工作年限", "deps": ["1"]}
+        ]
+      },
+      "concretion": {
+        "concretions": {
+          "1": "核实张三自2022年3月与A公司的劳动关系",
+          "2": "核算张三自2022年3月至2024年1月的工作年限"
+        }
+      }
+    },
+    "key_facts": ["事实1", "事实2"],
+    "python_code": "def calc_compensation():...",
+    "expected_result": 50000.0
+  }
+}
+"""
+
+REPLANNER_SCENARIO_SYSTEM = """你是一个重规划场景生成器。
+基于给定的法律问题，构造一个【检索失败】的场景，用于训练 Replanner 模型。
+
+【场景要求】：
+1. 前序 Plan 已部分执行但某步骤检索失败
+2. 提供已有的 global_facts（已成功检索的事实）
+3. 提供 fail_log（失败原因描述）
+4. 提供 fail_count（已失败次数，1-4）
+
+严格输出 JSON：
+{
+  "prompt": "作为 Replanner，用户问题：...\\n已有事实：...\\n失败记录：...\\n失败次数：N\\n请生成新的任务队列。",
+  "reference_queue": [
+    {"task_desc": "新查询步骤", "engine": "GRAPH_TRAVERSAL", "rationale": "理由"}
+  ]
+}
+"""
+
+
+# ============================================================================
+# 动态消息构造器
+# ----------------------------------------------------------------------------
+# 阶段 3：静态说明留在上面的常量里，插值逻辑集中到这里。
+# Worker / soul / benchmark / 训练脚本一律调用这些函数，
+# 保证同一个 Prompt 全项目只有一份定义。
+# ============================================================================
+def build_meta_planner_messages(user_query: str,
+                                simple: bool = False) -> List[Dict[str, str]]:
+    """
+    构造 Meta-Planner 消息。
+    simple=True 用精简模板（soul.py 在线推理路径，对延迟敏感）；
+    simple=False 用完整模板（Worker 路径，含详细格式约束）。
+    """
+    return [
+        {"role": "system",
+         "content": META_PLANNER_SIMPLE if simple else META_PLANNER_SYSTEM},
+        {"role": "user", "content": f"用户案情：{user_query}"},
+    ]
+
+
+def build_extractor_messages(sub_task: str, docs: str,
+                             original_query: str = None) -> List[Dict[str, str]]:
+    user = f"子任务：{sub_task}\n文档：\n{docs}"
+    if original_query:
+        user += f"\n[最高指令：确保不偏离原始诉求 -> {original_query}]"
+    return [
+        {"role": "system", "content": EXTRACTOR_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+def build_grader_messages(task_desc: str, docs: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": GRADER_SYSTEM},
+        {"role": "user", "content": f"任务：{task_desc}\n资料：{docs}"},
+    ]
+
+
+def build_reasoner_messages(sub_task: str, facts: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": REASONER_SYSTEM},
+        {"role": "user", "content": f"子任务：{sub_task}\n事实：{facts}"},
+    ]
+
+
+def format_evidence_chain(accumulated_context: List[Dict]) -> str:
+    """把历史观察拼成证据链文本（Generator 与最终报告共用一份拼法）"""
+    parts = []
+    for item in accumulated_context:
+        hop = item.get("hop", "?")
+        sub_task = item.get("sub_task", "")
+        reasoning = item.get("reasoning", item.get("data", ""))
+        parts.append(f"[Hop {hop}] {sub_task} -> {reasoning}")
+    return "\n\n".join(parts)
+
+
+def build_generator_messages(user_query: str,
+                             accumulated_context: List[Dict]) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": GENERATOR_SYSTEM},
+        {"role": "user",
+         "content": f"用户问题：{user_query}\n证据链：\n{format_evidence_chain(accumulated_context)}"},
+    ]
+
+
+def build_code_generator_messages(user_query: str, reasoning_chain: List[Dict],
+                                  error_context: str = "") -> List[Dict[str, str]]:
+    """代码生成消息；error_context 非空时在 system 后追加修正提示"""
+    chain_text = ""
+    for item in reasoning_chain:
+        chain_text += (f"[{item.get('sub_task', '')}] "
+                       f"事实: {item.get('facts', '')} "
+                       f"推理: {item.get('reasoning', '')}\n")
+
+    system = CODE_GENERATOR_SYSTEM
+    if error_context:
+        system += (f"\n\n【上次执行报错，请修正】\n{error_context}\n"
+                   "请分析错误原因并生成修正后的代码。")
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"案件：{user_query}\n\n推理链：\n{chain_text}"},
+    ]
+
+
+def build_replanner_messages(original_query: str, global_facts: List,
+                             retry_context: Dict,
+                             schema_json: str = None) -> List[Dict[str, str]]:
+    """
+    Replanner 消息：REPLANNER_SYSTEM 的静态说明 + 当前绝境状态。
+    schema_json 由调用方传入（Pydantic 的 schema_json()），
+    这样本模块不需要依赖 pydantic。
+    """
+    retry_context = retry_context or {}
+    fail_count = retry_context.get("fail_count", 0)
+    fail_log = retry_context.get("fail_log", "无明确报错，检索结果为空")
+
+    system = (
+        f"{REPLANNER_SYSTEM}\n\n"
+        f"【当前绝境状态】\n"
+        f"- 系统已连续碰壁次数：{fail_count}\n"
+        f"- 碰壁原因：{fail_log}\n"
+    )
+    if schema_json:
+        system += f"\n严格按照以下 JSON Schema 输出：\n{schema_json}\n"
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user",
+         "content": f"用户原始诉求：{original_query}\n"
+                    f"当前已掌握的铁证：{json.dumps(global_facts, ensure_ascii=False)}"},
+    ]
+
+
+def build_router_l2_messages(query: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": ROUTER_L2_SYSTEM},
+        {"role": "user", "content": query},
+    ]
+
+
+def build_benchmark_judge_messages(sample_query: str, ground_truth: str,
+                                   reference_trajectory, plan_str: str,
+                                   steps_summary: str, retry_count: int,
+                                   final_answer: str) -> List[Dict[str, str]]:
+    """轨迹裁判消息：静态评分规则在 BENCHMARK_JUDGE_SYSTEM，这里只拼数据"""
+    user = (
+        f"用户问题：{sample_query}\n"
+        f"标准答案：{ground_truth}\n"
+        f"理想执行规划（参考）：{reference_trajectory if reference_trajectory else '无'}\n"
+        f"实际初始规划：\n{plan_str}\n"
+        f"实际执行步骤：\n{steps_summary}\n"
+        f"总重试/回退次数：{retry_count}\n"
+        f"最终输出：{final_answer}"
+    )
+    return [
+        {"role": "system", "content": BENCHMARK_JUDGE_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+
+
+# ============================================================================
 # 全部模板索引
 # ============================================================================
 ALL_PROMPTS: Dict[str, str] = {
@@ -189,6 +394,8 @@ ALL_PROMPTS: Dict[str, str] = {
     "router_l2": ROUTER_L2_SYSTEM,
     "evol_instruct": EVOL_INSTRUCT_SYSTEM,
     "benchmark_judge": BENCHMARK_JUDGE_SYSTEM,
+    "synthesize_ground_truth": SYNTHESIZE_GROUND_TRUTH_SYSTEM,
+    "replanner_scenario": REPLANNER_SCENARIO_SYSTEM,
 }
 
 

@@ -6,19 +6,28 @@
 
 技术栈: scikit-learn (LogisticRegression) / sentence-transformers / re
 """
+import os
+import sys
 import re
 import time
 import json
 import logging
 import numpy as np
-from typing import Dict, Tuple, Any
+from typing import Dict, Any
 from sklearn.linear_model import LogisticRegression
 from sentence_transformers import SentenceTransformer
 
-# ---- 路由阈值，低于这个数就走简单路径 ----
-BGE_MODEL_PATH = "./RAG_data/bge-legal-v1"
-COMPLEX_SEMANTIC_THRESHOLD = 0.40
-COMPLEX_LENGTH_THRESHOLD = 80
+# 允许从任意 cwd / 任意入口导入根目录模块（config_loader）
+_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+from config_loader import cfg
+import prompts  # 阶段 3：Prompt 单一真源
+
+# 说明（阶段 2）：原先写死在这里的 BGE_MODEL_PATH / 0.40 / 80 已全部迁到
+# config.yaml 的 embedding.* 与 router.* 段，避免"改代码才生效"。
+# 这里的阈值只是 config 缺失时的兜底，不是真值来源。
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
 logger = logging.getLogger("UnifiedRouter")
@@ -26,8 +35,18 @@ logger = logging.getLogger("UnifiedRouter")
 # ---- 统一智能路由网关 (query.py 专用，与 soul.py 的缓存包装器配对) ----
 class UnifiedQueryRouter_Query:
     def __init__(self):
-        logger.info("正在把嵌入模型和分类器加载进显存...")
-        self.embedder = SentenceTransformer(BGE_MODEL_PATH, device='cuda')
+        # ---- 阶段 2：全部改为读 config.yaml，不再写死 ----
+        model_path = cfg.get("embedding", "model_path", default="./RAG_data/bge-legal-v1")
+        device = cfg.get("embedding", "device", default="cpu")
+        self.complex_semantic_threshold = cfg.get(
+            "router", "complex_semantic_threshold", default=0.40)
+        self.complex_length_threshold = cfg.get(
+            "router", "complex_length_threshold", default=80)
+        self.simple_confidence_floor = cfg.get(
+            "router", "simple_confidence_floor", default=0.10)
+
+        logger.info(f"正在把嵌入模型和分类器加载进显存... (path={model_path}, device={device})")
+        self.embedder = SentenceTransformer(model_path, device=device)
         self.classifier = LogisticRegression(class_weight='balanced')
 
         # L0 层：零成本正则 —— 闲聊、法条、简单句式直接拦截
@@ -65,27 +84,34 @@ class UnifiedQueryRouter_Query:
         当正则和轻量模型都无法给出高置信度判断时，
         调用 LLM 做最终意图裁决，只输出 JSON:
         {"intent": "CHITCHAT" | "SIMPLE_QA" | "COMPLEX_TASK"}
-        """
-        logger.debug("触发 LLM 兜底路由...")
-        # 真实调用示例（请替换为你的 DeepSeek / OpenAI 客户端）：
-        # system_prompt = (
-        #     "你是一个法律意图分类器。将用户输入分为：\n"
-        #     "1. CHITCHAT (闲聊)\n"
-        #     "2. SIMPLE_QA (简单事实问答)\n"
-        #     "3. COMPLEX_TASK (复杂案情推演)\n"
-        #     "只输出JSON: {\"intent\": \"分类结果\"}"
-        # )
-        # response = client.chat.completions.create(
-        #     model="deepseek-chat",
-        #     messages=[{"role":"system","content":system_prompt},
-        #               {"role":"user","content":query}],
-        #     temperature=0.0,
-        #     response_format={"type": "json_object"}
-        # )
-        # return json.loads(response.choices[0].message.content)["intent"]
 
-        # 本地模拟逻辑，仅用于演示
-        time.sleep(0.3)  # 模拟网络延迟
+        阶段 3：从"启发式桩 + time.sleep(0.3)"换成真实调用
+        （Prompt 来自 prompts.ROUTER_L2_SYSTEM）。
+        调用失败或返回非法意图时退回保守启发式，并明确打 WARNING，
+        避免把"猜"当成"模型裁决"。
+        """
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=cfg.get("llm", "api_key"),
+                base_url=cfg.get("llm", "base_url", default="https://api.deepseek.com"),
+            )
+            resp = client.chat.completions.create(
+                model=cfg.get("llm", "judge_model", default="deepseek-chat"),
+                messages=prompts.build_router_l2_messages(query),
+                temperature=cfg.get("llm", "temperature_judge", default=0.0),
+                max_tokens=cfg.get("llm", "max_tokens_judge", default=512),
+                response_format={"type": "json_object"},
+            )
+            intent = json.loads(resp.choices[0].message.content).get("intent", "")
+            if intent in ("CHITCHAT", "SIMPLE_QA", "COMPLEX_TASK"):
+                logger.info(f"🌐 [L2] LLM 裁决 -> {intent}")
+                return intent
+            logger.warning(f"[L2] LLM 返回非法意图 '{intent}'，回退启发式")
+        except Exception as e:
+            logger.warning(f"[L2] LLM 裁决失败({e})，回退启发式")
+
+        # 降级：保守启发式（宁可走复杂流程，也不要漏掉需要多跳检索的案情）
         if "赔" in query or "怎么办" in query or len(query) > 30:
             return "COMPLEX_TASK"
         return "SIMPLE_QA"
@@ -135,7 +161,7 @@ class UnifiedQueryRouter_Query:
             }
 
         # 4. 长度启发式：超长文本直接判为复杂案情
-        if len(query) >= COMPLEX_LENGTH_THRESHOLD:
+        if len(query) >= self.complex_length_threshold:
             logger.info(f"⚡ [L0] 长度启发式({len(query)} chars) -> 复杂案情")
             return {
                 "intent": "COMPLEX_TASK",
@@ -148,14 +174,14 @@ class UnifiedQueryRouter_Query:
         complex_prob = self.classifier.predict_proba(query_vector.reshape(1, -1))[0][1]
         logger.info(f"📊 [L1] 语义复杂概率: {complex_prob:.2%}")
 
-        if complex_prob >= COMPLEX_SEMANTIC_THRESHOLD:
+        if complex_prob >= self.complex_semantic_threshold:
             logger.info("🚨 [L1] 高概率复杂问题 -> 进入复杂流程")
             return {
                 "intent": "COMPLEX_TASK",
                 "source": "L1_Semantic",
                 "vector": query_vector
             }
-        elif complex_prob < 0.10:   # 非常低的复杂概率，果断视为简单
+        elif complex_prob < self.simple_confidence_floor:   # 非常低的复杂概率，果断视为简单
             logger.info("✅ [L1] 低概率，按简单问题处理")
             return {
                 "intent": "SIMPLE_QA",
@@ -188,10 +214,12 @@ class UnifiedQueryRouter_Query:
                 from soul import LegalDenseGraphBuilder as SoulGraphBuilder
 
                 # 构建 Agent（使用 soul.py 内的图引擎和操作器）
-                graph_engine = SoulGraphBuilder(embedding_dim=768)
+                # 阶段 2：图引擎参数与 LLM 凭据全部来自 config.yaml。
+                # 原先这里写死 embedding_dim=768，与 BGE-M3 的 1024 维不符。
+                graph_engine = SoulGraphBuilder.from_config()
                 agentic_ops = AgenticNodesOperator(
-                    api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-                    base_url="https://api.deepseek.com"
+                    api_key=cfg.get("llm", "api_key"),
+                    base_url=cfg.get("llm", "base_url", default="https://api.deepseek.com"),
                 )
 
                 # 复用 router 自身的 embedder 作为检索编码器

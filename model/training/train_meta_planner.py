@@ -10,7 +10,12 @@ import os, sys, json, logging
 import numpy as np
 from typing import List
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# 路径引导：model/ 用于导入 utils.*，项目根目录用于导入 double_layer_plan
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.abspath(os.path.join(_THIS_DIR, "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(_THIS_DIR, "..", "..")))
+
+from double_layer_plan import plan_steps_from_raw
 
 from datasets import Dataset, load_dataset
 from trl import SFTTrainer
@@ -97,8 +102,16 @@ if os.path.exists(data_path):
                 continue
             try:
                 plan_data = json.loads(msgs[-1].get("content", "{}"))
-                plan_steps = plan_data.get("task_queue", [])
+                # 阶段 3：统一走 plan_steps_from_raw，同时兼容
+                # 「双层蓝图」与旧的扁平 task_queue / strategy_queue。
+                # 此前这里只读 plan_data["task_queue"]，Planner 输出改成双层蓝图后
+                # 会静默拿到空列表，把全部样本按"低质量"剔除。
+                plan_steps = plan_steps_from_raw(plan_data)
                 graph_truth = sample.get("ground_truth", {}).get("key_facts", [])
+                if not plan_steps:
+                    logger.warning(f"样本无法提取计划步骤，已剔除: {list(plan_data.keys())}")
+                    rejected += 1
+                    continue
                 if graph_truth:
                     score = rewarder.compute_dtw_reward(plan_steps, graph_truth)
                     if score >= 0.3:

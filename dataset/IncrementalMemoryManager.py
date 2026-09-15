@@ -28,7 +28,20 @@ class MockGraphDB:
         self.edges: List[Tuple[int, int, str]] = []  # (src, dst, type)
         self._id_counter = 0
 
-    def add_node(self, props: dict) -> int:
+    def add_node(self, props: dict, node_id: int = None) -> int:
+        """
+        新增节点，返回其 ID（**int**，与图引擎的顶点 ID 同一空间）。
+
+        :param node_id: 显式指定 ID（阶段 10 新增）。默认 None 表示自增分配。
+            桥接器从图引擎 bootstrap 时**必须**指定：否则自增出来的 ID 与
+            图引擎的顶点 ID 不同，`add_edge(父, 子)` 会指向不存在的节点、
+            `set_node_text(id)` 也会挂在错误的键上。
+        """
+        if node_id is not None:
+            node_id = int(node_id)
+            self._id_counter = max(self._id_counter, node_id)
+            self.nodes[node_id] = {**props, "dirty": False}
+            return node_id
         self._id_counter += 1
         self.nodes[self._id_counter] = {**props, "dirty": False}
         return self._id_counter
@@ -63,6 +76,9 @@ class MockGraphDB:
 class DynamicThresholder:
     """使用一维高斯混合模型将相似度分为 Accept/Reject 两类"""
 
+    # 少于此样本数时 GMM 不可靠（n_components=2，样本太少会直接抛异常）
+    MIN_SAMPLES = 4
+
     @staticmethod
     def split(similarity_scores: np.ndarray) -> Tuple[List[int], float]:
         """
@@ -70,27 +86,53 @@ class DynamicThresholder:
         返回：
             accept_indices: 被接受挂载的簇索引列表
             dynamic_threshold: 动态决策边界 (Accept 分布的最小分数)
+
+        阶段 6 兜底（原先没有，任一情况都会让整条增量注入流程抛异常）：
+          1. 样本数 < MIN_SAMPLES   -> GMM 无法拟合两个分量
+          2. 所有得分几乎相同       -> 两个高斯分量没有意义
+          3. GMM 拟合本身失败       -> 数值问题
+          4. 拟合结果为空簇         -> 退化为兜底策略
         """
-        if len(similarity_scores) == 0:
+        scores = np.asarray(similarity_scores, dtype=np.float64).ravel()
+        if scores.size == 0:
             return [], 0.0
 
-        X = similarity_scores.reshape(-1, 1)
-        # 两个高斯分量，强制球形协方差
-        gmm = GaussianMixture(n_components=2, covariance_type='spherical',
-                              random_state=42, reg_covar=1e-5)
-        labels = gmm.fit_predict(X)
+        # 兜底 1：样本太少
+        if scores.size < DynamicThresholder.MIN_SAMPLES:
+            logger.info(f"相似度样本仅 {scores.size} 条（< {DynamicThresholder.MIN_SAMPLES}），"
+                        f"GMM 不适用，改用中位数阈值")
+            return DynamicThresholder._fallback_split(scores)
 
-        # 找出均值更高的簇作为 Accept
+        # 兜底 2：得分几乎无差异
+        if float(scores.max() - scores.min()) < 1e-6:
+            logger.info("相似度得分几乎相同，GMM 无区分意义，改用中位数阈值")
+            return DynamicThresholder._fallback_split(scores)
+
+        # 正常路径：GMM 动态分界
+        try:
+            X = scores.reshape(-1, 1)
+            gmm = GaussianMixture(n_components=2, covariance_type='spherical',
+                                  random_state=42, reg_covar=1e-5)
+            labels = gmm.fit_predict(X)
+        except Exception as e:
+            logger.warning(f"GMM 拟合失败({e})，改用中位数阈值")
+            return DynamicThresholder._fallback_split(scores)
+
         means = gmm.means_.flatten()
-        accept_label = np.argmax(means)
-        accept_mask = (labels == accept_label)
+        accept_label = int(np.argmax(means))
+        accept_indices = np.where(labels == accept_label)[0].tolist()
+        if not accept_indices:
+            logger.warning("GMM 未分出 accept 簇，改用中位数阈值")
+            return DynamicThresholder._fallback_split(scores)
 
-        accept_indices = np.where(accept_mask)[0].tolist()
-        if len(accept_indices) > 0:
-            dynamic_threshold = np.min(similarity_scores[accept_indices])
-        else:
-            dynamic_threshold = 0.0
-        return accept_indices, dynamic_threshold
+        return accept_indices, float(scores[accept_indices].min())
+
+    @staticmethod
+    def _fallback_split(scores: np.ndarray) -> Tuple[List[int], float]:
+        """稳健兜底：中位数及以上视为 Accept"""
+        threshold = float(np.median(scores))
+        accept_indices = np.where(scores >= threshold)[0].tolist()
+        return accept_indices, threshold
 
 
 # ============================================================================
@@ -108,15 +150,21 @@ class IncrementalMemoryManager:
 
     ABSOLUTE_FLOOR_THRESHOLD = 0.4  # 绝对保底阈值，防止误挂载
 
-    def __init__(self, graph_db: MockGraphDB, summary_embeddings: Dict[int, np.ndarray]):
+    def __init__(self, graph_db: MockGraphDB, summary_embeddings: Dict[int, np.ndarray],
+                 floor_threshold: float = None):
         """
         :param graph_db: 图数据库实例 (需实现 children/parents/mark_dirty 等方法)
         :param summary_embeddings: {cluster_id: summary_vector} 的映射，仅包含底层摘要层
+        :param floor_threshold: 覆盖绝对保底阈值；None 时沿用类常量
+                                ABSOLUTE_FLOOR_THRESHOLD（阶段 6 让它可注入，便于测试与调参）
         """
         self.db = graph_db
         self.summary_embeddings = summary_embeddings  # Layer 1 簇摘要向量
         # 记录节点文本内容，用于夜间重写（简化演示）
         self.text_storage: Dict[int, str] = {}
+
+        if floor_threshold is not None:
+            self.ABSOLUTE_FLOOR_THRESHOLD = float(floor_threshold)
 
     def set_node_text(self, node_id: int, text: str):
         self.text_storage[node_id] = text
@@ -154,7 +202,12 @@ class IncrementalMemoryManager:
         # 如果没有簇存在，自动创建第一个簇
         if not self.summary_embeddings:
             logger.info("无现有簇，自动创建根簇")
-            self._create_new_cluster(parent_of_new=None, new_leaf_id=node_id)
+            # 阶段 8 修复：原先这里只调 _create_new_cluster() 而没有挂载叶子，
+            # 结果第一个叶子在树里**没有任何父边**，get_children(根簇) 恒为空，
+            # nightly_rewrite / memory_graph_bridge.sync_dirty_summaries 永远看不到它。
+            # 下方的孤儿分支一直是建簇 + 挂载两步都做，两处行为应一致。
+            root_cluster_id = self._create_new_cluster(parent_of_new=None, new_leaf_id=node_id)
+            self._mount_leaf_to_cluster(node_id, root_cluster_id, mark_dirty=True)
             return node_id
 
         scores, cluster_ids = self._compute_similarities(embedding)
@@ -165,10 +218,10 @@ class IncrementalMemoryManager:
         max_score = max(accept_scores) if accept_scores else 0.0
         if max_score < self.ABSOLUTE_FLOOR_THRESHOLD:
             logger.info(f"孤儿节点检测 (最高相似度 {max_score:.4f} < {self.ABSOLUTE_FLOOR_THRESHOLD})，创建新簇")
-            self._create_new_cluster(parent_of_new=None, new_leaf_id=node_id)
-            # 新簇同时作为该节点的父节点，加入 summary 库
-            # 此处新簇的摘要暂时用节点自身内容，夜间再优化
-            new_cluster_id = list(self.summary_embeddings.keys())[-1]
+            # 阶段 6：用 _create_new_cluster 的返回值作为新簇 ID。
+            # 原先靠 `list(self.summary_embeddings.keys())[-1]` 猜"最后一个就是新建的"，
+            # 一旦 dict 顺序被后续插入打乱（或新簇没写进索引）就会挂错父节点。
+            new_cluster_id = self._create_new_cluster(parent_of_new=None, new_leaf_id=node_id)
             self._mount_leaf_to_cluster(node_id, new_cluster_id, mark_dirty=True)
             return node_id
 

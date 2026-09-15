@@ -216,8 +216,15 @@ TESTING_ADVICE = """
 4. A/B 测试：10% 流量使用新规则，对比结果质量
 """
 
-print("Replanner 规则扩展报告已生成。")
-print(f"当前覆盖率: ~40% (7条规则)")
-print(f"建议扩展至: ~25条规则 (覆盖 ~90% 高频场景)")
-print(ADVANCED_RULE_ENGINE)
-print(PRIORITY_SCHEDULING)
+# 阶段 6：这些输出原先写在模块顶层，任何 `import replanner_rules_report`
+# 都会往 stdout 打印一大段文本。改成只在直接运行时输出。
+#
+# 注意：本文件是**报告/规划文档**，不是可加载的规则表。
+# 真正生效的规则在 replanner_rules.py（当前 7 条）；下面 MISSING_RULES
+# 里列的 P0/P1/P2 场景是待补齐清单（补齐后覆盖率可从 ~40% 提到 ~90%）。
+if __name__ == "__main__":
+    print("Replanner 规则扩展报告已生成。")
+    print(f"当前覆盖率: ~40% ({len(CURRENT_RULES)}条规则，实际生效于 replanner_rules.py)")
+    print(f"建议扩展至: ~25条规则 (覆盖 ~90% 高频场景)")
+    print(ADVANCED_RULE_ENGINE)
+    print(PRIORITY_SCHEDULING)

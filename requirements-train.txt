@@ -1,0 +1,27 @@
+# ==========================================
+# 训练 / 自部署推理依赖 —— 只在训练机与 GPU 推理机上装
+# ==========================================
+# 安装：pip install -r requirements-train.txt
+#
+# 重要：unsloth 与 vllm 的版本约束经常互相冲突，训练和推理建议分环境：
+#   - 训练环境: requirements-train.txt
+#   - 推理环境: requirements-train.txt + vllm（装完 vllm 后不要再动 torch）
+
+-r requirements.txt
+
+# ---- 训练基座 ----
+torch>=2.1
+transformers>=4.40
+datasets>=2.18
+accelerate>=0.30
+peft>=0.10
+trl>=0.9
+bitsandbytes>=0.43
+
+# ---- 微调加速（Unsloth 4-bit QLoRA）----
+unsloth>=2024.4
+
+# ---- 自部署推理（VLLM prefix caching）----
+# 可选项：未安装时 model/utils/vllm_engine.py 会抛 RuntimeError，
+# create_llm_backend("auto") 会自动回退到 DeepSeek API
+vllm>=0.5

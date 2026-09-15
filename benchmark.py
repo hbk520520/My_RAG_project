@@ -6,31 +6,74 @@
 
 技术栈: DeepSeek API (裁判模型) / numpy / dataclasses / openai
 """
+import os
+import sys
 import json
-import time
 import logging
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass
 from collections import defaultdict
 
-import openai
+# 允许从任意 cwd 导入根目录模块（config_loader / prompts）
+_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+from config_loader import cfg
+import prompts  # 阶段 3：Prompt 单一真源
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LegalBenchmark")
+
 # ============================================================================
-DEEPSEEK_API_KEY = "your-deepseek-api-key"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-JUDGE_MODEL = "deepseek-chat"      # 可使用 deepseek-reasoner 获得更强逻辑，但成本更高
-judge_client = openai.OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+# 裁判模型（阶段 2：原先这里写死 "your-deepseek-api-key" 占位符）
+# 客户端改为惰性创建 —— 这样 import benchmark 不再要求已配置 API Key，
+# 只有真正调用 llm_judge() 时才校验，便于离线跑检索类指标。
+# ============================================================================
+_judge_client = None
 
 
-def llm_judge(prompt: str, temperature: float = 0.0, max_tokens: int = 512) -> str:
-    """调用 DeepSeek 裁判模型，返回文本结果"""
+def _get_judge_client():
+    """惰性创建裁判模型客户端"""
+    global _judge_client
+    if _judge_client is None:
+        import openai
+        api_key = cfg.get("llm", "api_key")
+        if not api_key:
+            raise RuntimeError(
+                "未配置 LLM API Key，无法调用裁判模型。"
+                "请设置环境变量 DEEPSEEK_API_KEY（参考 .env.example）。"
+            )
+        _judge_client = openai.OpenAI(
+            api_key=api_key,
+            base_url=cfg.get("llm", "base_url", default="https://api.deepseek.com"),
+        )
+    return _judge_client
+
+
+def llm_judge(prompt: str = None, temperature: float = 0.0, max_tokens: int = 512,
+              messages: list = None) -> str:
+    """调用裁判模型，返回文本结果
+
+    两种用法：
+      llm_judge("单轮 prompt")               -> 只发一条 user 消息
+      llm_judge(messages=[...])              -> 直接使用给定消息列表
+                                                （阶段 3 新增，配合
+                                                 prompts.build_benchmark_judge_messages）
+
+    注意：model 每次从 cfg 读取，方便在不重启进程内切换
+    deepseek-chat / deepseek-reasoner（后者逻辑更强但成本更高）。
+    """
+    if messages is None:
+        if prompt is None:
+            raise ValueError("llm_judge 需要 prompt 或 messages 参数之一")
+        messages = [{"role": "user", "content": prompt}]
     try:
-        resp = judge_client.chat.completions.create(
-            model=JUDGE_MODEL,
-            messages=[{"role": "user", "content": prompt}],
+        client = _get_judge_client()
+        resp = client.chat.completions.create(
+            model=cfg.get("llm", "judge_model", default="deepseek-chat"),
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens
         )
@@ -91,33 +134,47 @@ class LegalBenchmark:
     # 2.1 检索质量评测 (HR@K, MRR, Noise Ratio)
     # ------------------------------------------------------------------
     def evaluate_retrieval(self, samples: List[TestSample]) -> Dict[str, float]:
-        """返回 HR@K, MRR, Noise Ratio"""
+        """
+        返回 HR@K, MRR, Noise Ratio。
+
+        阶段 6 修复两个问题：
+          1. 原先每个样本会对每个 k 各调一次 retrieve（len(k_values)+1 次），
+             同一个查询被反复检索，评测成本与限流风险都被放大。
+          2. MRR 原先写在 k 循环里，等于把不同 k 截断下的倒数排名做了平均，
+             指标含义被污染（MRR 的 k 只影响"能不能找到"，不影响排名本身）。
+
+        现在：**每个样本只检索一次**（取最大 K 的排序列表），
+        HR@K / MRR / NoiseRatio 全部从这一份排名推导。
+        """
         metrics = defaultdict(list)
+        max_k = max(self.k_values) if self.k_values else 0
+        if max_k <= 0:
+            logger.warning("k_values 为空，检索评测跳过")
+            return {}
 
         for sample in samples:
-            for k in self.k_values:
-                result = self.retrieve(sample.query, k)
-                retrieved_ids = result.top_k_ids
+            result = self.retrieve(sample.query, max_k)
+            ranked = list(result.top_k_ids or [])
+            relevant = set(sample.relevant_doc_ids or [])
 
-                # Hit Rate @K
-                hit = any(rid in sample.relevant_doc_ids for rid in retrieved_ids[:k])
+            # Hit Rate @K：前 k 名里是否出现任一相关文档
+            for k in self.k_values:
+                hit = any(rid in relevant for rid in ranked[:k])
                 metrics[f"HR@{k}"].append(1.0 if hit else 0.0)
 
-                # MRR (只计算第一个相关文档的倒数排名)
-                for rank, rid in enumerate(retrieved_ids[:k], start=1):
-                    if rid in sample.relevant_doc_ids:
-                        metrics["MRR"].append(1.0 / rank)
-                        break
-                else:
-                    metrics["MRR"].append(0.0)
+            # MRR：第一个相关文档的倒数排名（整条排名只统计一次）
+            for rank, rid in enumerate(ranked, start=1):
+                if rid in relevant:
+                    metrics["MRR"].append(1.0 / rank)
+                    break
+            else:
+                metrics["MRR"].append(0.0)
 
-            # Noise Ratio：检索结果中噪声文档的比例 (取最大K)
-            max_k = max(self.k_values)
-            result = self.retrieve(sample.query, max_k)
-            noise_count = sum(1 for rid in result.top_k_ids if rid in sample.noise_doc_ids)
-            metrics["NoiseRatio"].append(noise_count / max_k if max_k > 0 else 0.0)
+            # Noise Ratio：前 max_k 名里噪声文档的占比
+            noise = set(sample.noise_doc_ids or [])
+            noise_count = sum(1 for rid in ranked[:max_k] if rid in noise)
+            metrics["NoiseRatio"].append(noise_count / max_k)
 
-        # 平均
         avg_metrics = {k: float(np.mean(v)) for k, v in metrics.items()}
         return avg_metrics
 
@@ -135,31 +192,24 @@ class LegalBenchmark:
 
     def _score_trajectory(self, sample: TestSample, traj: TrajectoryLog) -> float:
         """使用 DeepSeek 裁判对一条轨迹打分 (0-1)"""
-        # 构造裁判 prompt
+        # 构造裁判消息
+        # 阶段 3：静态评分规则来自 prompts.BENCHMARK_JUDGE_SYSTEM，
+        # 变量数据由 prompts.build_benchmark_judge_messages 拼装。
         plan_str = "\n".join([f"- {p}" for p in traj.plan])
         steps_summary = "\n".join(
             [f"Step {s['step']} ({s['node']}): {s['action']} → {s['result_summary'][:100]}"
              for s in traj.executed_steps]
         )
-        prompt = f"""你是一个法律智能体轨迹裁判。请根据以下信息对智能体的“思考过程”进行评分（0到1之间，保留两位小数）。
-
-用户问题：{sample.query}
-标准答案：{sample.ground_truth_answer}
-理想执行规划（参考）：{sample.optional_trajectory if sample.optional_trajectory else "无"}
-实际初始规划：
-{plan_str}
-实际执行步骤：
-{steps_summary}
-总重试/回退次数：{traj.retry_count}
-最终输出：{traj.final_answer}
-
-评分要求（综合考量）：
-1. 初始规划是否合理且高效（无需多余步骤）？ (权重 0.3)
-2. 执行过程是否直接？重试/无效跳转是否过多？ (权重 0.3)
-3. 最终答案是否正确且完整？ (权重 0.4)
-
-请只输出一个数字（例如 0.85），不要包含其他文字。"""
-        resp = llm_judge(prompt, temperature=0.0, max_tokens=10)
+        messages = prompts.build_benchmark_judge_messages(
+            sample_query=sample.query,
+            ground_truth=sample.ground_truth_answer,
+            reference_trajectory=sample.optional_trajectory,
+            plan_str=plan_str,
+            steps_summary=steps_summary,
+            retry_count=traj.retry_count,
+            final_answer=traj.final_answer,
+        )
+        resp = llm_judge(messages=messages, temperature=0.0, max_tokens=10)
         try:
             return float(resp)
         except:

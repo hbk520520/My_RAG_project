@@ -4,6 +4,7 @@
 
 # --- LLM API ---
 llm:
+  # 没有默认值：缺失时 config_loader 会打 WARNING，调用 LLM 时才会失败
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "https://api.deepseek.com"
   judge_model: "deepseek-chat"
@@ -45,6 +46,11 @@ graph:
   top_k_search: 50
   degree_threshold: 15
 
+# --- 检索器（BGE-M3 挂 LoRA，对齐 model/training/train_retriever.py 的产物）---
+retriever:
+  lora_path: "./saved_loras/retriever_bge_m3"   # 目录不存在时自动退回原始 BGE-M3 权重
+  top_k: 5                                       # 每个子任务召回的文档数
+
 # --- 路由分类器 ---
 router:
   complex_semantic_threshold: 0.40
@@ -53,7 +59,8 @@ router:
 
 # --- Kafka ---
 kafka:
-  bootstrap_servers: "localhost:9092"
+  # ${VAR:-默认值} —— 容器内由 k8s Deployment 的 KAFKA_BOOTSTRAP 覆盖
+  bootstrap_servers: "${KAFKA_BOOTSTRAP:-localhost:9092}"
   topics:
     planner_pending: "topic.planner.pending"
     retriever_pending: "topic.retriever.pending"
@@ -64,6 +71,13 @@ kafka:
     auto_offset_reset: "earliest"
     enable_auto_commit: false
     max_poll_records: 1
+    # 各 Worker 的消费组（阶段 2 从代码硬编码迁到配置）
+    groups:
+      planner: "planner-group"
+      retriever: "retriever-group"
+      grader: "grader-group"
+      replanner: "replanner-group"
+      reasoner: "reasoner-group"
   producer:
     acks: "all"
     compression_type: "gzip"
@@ -71,7 +85,7 @@ kafka:
 
 # --- Redis ---
 redis:
-  url: "redis://localhost:6379"
+  url: "${REDIS_URL:-redis://localhost:6379}"
   state_expire_seconds: 3600
 
 # --- 语义缓存 ---
@@ -102,6 +116,8 @@ observability:
   log_format: "json"         # "json" 或 "text"
   prometheus_port: 9090
   health_check_port: 8080
+  # 处理失败的消息落盘位置（阶段 6 接入；Worker 循环捕获未处理异常时写入）
+  dlq_path: "./dlq.jsonl"
 
 # --- 训练 ---
 training:

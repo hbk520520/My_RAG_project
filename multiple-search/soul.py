@@ -9,7 +9,7 @@
 
 技术栈: LangGraph (StateGraph/END) / igraph / FAISS / Pydantic / DeepSeek API
 """
-import os, json, time, operator, logging
+import os, sys, json, time, operator, logging
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 from pydantic import BaseModel, ValidationError
 from openai import OpenAI
@@ -17,6 +17,22 @@ import numpy as np
 import faiss
 import igraph as ig
 from langgraph.graph import StateGraph, END
+
+# 允许从任意 cwd / 任意入口导入根目录模块（config_loader / double_layer_plan）
+_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+from config_loader import cfg
+import prompts  # 阶段 3：Prompt 单一真源（不再内联副本）
+# 阶段 5：硬规则表与 Replanner Worker 共用同一份（原先这里只有 1 条规则）
+from replanner_rules import apply_hard_rules
+
+# 阶段 5：沙箱执行统一入口（与 reasoner_worker 共用同一份 Docker/降级逻辑）
+_SANDBOX_DIR = os.path.join(_ROOT_DIR, "multiple-search", "legal_sandbox")
+if _SANDBOX_DIR not in sys.path:
+    sys.path.insert(0, _SANDBOX_DIR)
+from sandbox_exec import run_code_once, destroy_session as destroy_sandbox_session
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LegalAgentPlanReplan")
@@ -86,94 +102,34 @@ class UnifiedQueryRouter_Soul:
         """透传路由方法"""
         return self._router.route(query)
 # ============================================================================
-# 第一部分：法律稠密图引擎（igraph + FAISS）—— 保持原样
+# 第一部分：法律稠密图引擎
 # ============================================================================
-class LegalDenseGraphBuilder:
-    def __init__(self,
-                 embedding_dim: int = 768,
-                 similarity_threshold: float = 0.85,
-                 dedup_threshold: float = 0.98,
-                 top_k_search: int = 100,
-                 degree_threshold: int = 15):
-        self.dim = embedding_dim
-        self.threshold = similarity_threshold
-        self.dedup_threshold = dedup_threshold
-        self.top_k = top_k_search
-        self.degree_threshold = degree_threshold
-
-        self.graph = ig.Graph(directed=False)
-        base_index = faiss.IndexHNSWFlat(self.dim, 32, faiss.METRIC_INNER_PRODUCT)
-        self.index = faiss.IndexIDMap(base_index)
-        logger.info(f"Graph engine init: dim={self.dim}, M=32, metric=IP")
-
-    def _l2_normalize(self, vector: np.ndarray) -> np.ndarray:
-        norm = np.linalg.norm(vector)
-        return vector / norm if norm > 0 else vector
-
-    def build_initial_graph_batch(self,
-                                  nodes_data: List[Dict[str, Any]],
-                                  embeddings: np.ndarray,
-                                  search_batch_size: int = 10000) -> None:
-        total_nodes = len(nodes_data)
-        if total_nodes != embeddings.shape[0]:
-            raise ValueError("节点数量与矩阵维度不匹配！")
-
-        logger.info(f"开始批量构建图谱，总节点数: {total_nodes}")
-        self.graph.add_vertices(total_nodes)
-        self.graph.vs["name"] = [n["id"] for n in nodes_data]
-        self.graph.vs["content"] = [n["content"] for n in nodes_data]
-        self.graph.vs["type"] = [n["type"] for n in nodes_data]
-        self.graph.vs["metadata"] = [n["metadata"] for n in nodes_data]
-
-        all_ids = np.array([n["id"] for n in nodes_data], dtype=np.int64)
-        self.index.add_with_ids(embeddings.astype(np.float32), all_ids)
-        logger.info("FAISS 索引批量注入完成。")
-
-        all_edges, all_weights = [], []
-        for i in range(0, total_nodes, search_batch_size):
-            end_idx = min(i + search_batch_size, total_nodes)
-            batch_emb = embeddings[i:end_idx].astype(np.float32)
-            batch_ids = all_ids[i:end_idx]
-            sims, n_ids = self.index.search(batch_emb, self.top_k)
-            for row_idx, query_id in enumerate(batch_ids):
-                for sim, target_id in zip(sims[row_idx], n_ids[row_idx]):
-                    if (self.threshold <= sim < self.dedup_threshold
-                            and target_id != query_id and target_id != -1):
-                        all_edges.append((query_id, int(target_id)))
-                        all_weights.append(float(sim))
-
-        unique_edges = {}
-        for edge, w in zip(all_edges, all_weights):
-            sorted_edge = tuple(sorted(edge))
-            if sorted_edge not in unique_edges:
-                unique_edges[sorted_edge] = w
-
-        edges_list = list(unique_edges.keys())
-        weights_list = list(unique_edges.values())
-        name_to_index = {v["name"]: v.index for v in self.graph.vs}
-        igraph_edges = [(name_to_index[e[0]], name_to_index[e[1]]) for e in edges_list]
-        self.graph.add_edges(igraph_edges)
-        self.graph.es["weight"] = weights_list
-        logger.info(f"初始图谱构建完毕：{self.graph.vcount()} 个节点，{self.graph.ecount()} 条边。")
-
-    def add_node(self, node_id, content, node_type, embedding, metadata=None):
-        # 简化保留接口，此处省略具体实现（与原版一致）
-        pass
+# 阶段 4：这里原有一份与 dataset/graph.py **同名**的 LegalDenseGraphBuilder 副本。
+# 两份实现行为并不相同（参数名、是否加载 BGE-M3、有无 tombstone/脏传播/摘要机制），
+# 调用方根本分不清自己在用哪一个。现在统一复用 dataset/graph.py 的实现。
+#
+# 新实现只在需要"文本→向量"时才懒加载 BGE-M3；本模块的用法是外部注入
+# embedding_fn + 传入预计算向量，因此不会触发模型加载。
+#
+# 参数名变化：similarity_threshold → connect_threshold，
+#            dedup_threshold      → label_threshold（与 config.yaml 的 graph.* 对齐）
+from dataset.graph import LegalDenseGraphBuilder, vname  # noqa: F401  (重新导出 + 顶点名转换)
 
 # ============================================================================
 # 第二部分：LLM 基座与节点操作器（Meta‑Planner/Extractor/Reasoner/Generator）
 # ============================================================================
 class LegalLLMBase:
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-        self.model_name = "deepseek-chat"
+    def __init__(self, api_key: str = None, base_url: str = None):
+        # 阶段 2：默认值改为从 config.yaml 取，调用方不传也能正常工作
+        self.client = OpenAI(
+            api_key=api_key or cfg.get("llm", "api_key"),
+            base_url=base_url or cfg.get("llm", "base_url", default="https://api.deepseek.com"),
+        )
+        self.model_name = cfg.get("llm", "judge_model", default="deepseek-chat")
 
-    def _call_llm(self, system_prompt: str, user_prompt: str,
-                  require_json: bool = False, temperature: float = 0.1) -> str:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+    def _call_messages(self, messages: List[Dict[str, str]],
+                       require_json: bool = False, temperature: float = 0.1) -> str:
+        """按 messages 列表调用 LLM（阶段 3 新增，配合 prompts.py 的构造器）"""
         response_format = {"type": "json_object"} if require_json else None
         try:
             response = self.client.chat.completions.create(
@@ -186,6 +142,16 @@ class LegalLLMBase:
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             return "{}" if require_json else f"系统异常: {str(e)}"
+
+    def _call_llm(self, system_prompt: str, user_prompt: str,
+                  require_json: bool = False, temperature: float = 0.1) -> str:
+        """保留原签名，内部转成 messages，兼容既有调用方"""
+        return self._call_messages(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user", "content": user_prompt}],
+            require_json=require_json,
+            temperature=temperature,
+        )
 
 
 class ExecutionPlan(BaseModel):
@@ -200,9 +166,11 @@ class AgenticNodesOperator(LegalLLMBase):
         生成双层蓝图 P_q = {S_q, C_q}，返回展平后的可执行任务队列。
         兼容旧格式：若 LLM 仍返回扁平列表，自动转换。
         """
-        system_prompt = """你是顶级法律案件拆解专家（Meta-Planner）。面对复杂法律问题，生成双层蓝图（抽象DAG + 具象化映射）。严格输出JSON: {"skeleton":{"nodes":[{"id":"1","abstract":"...","deps":[]}]},"concretion":{"concretions":{"1":"..."}}}"""
-        user_prompt = f"用户问题：{user_query}"
-        raw = self._call_llm(system_prompt, user_prompt, require_json=True)
+        # 阶段 3：Prompt 来自 prompts.META_PLANNER_SIMPLE，不再内联副本
+        raw = self._call_messages(
+            prompts.build_meta_planner_messages(user_query, simple=True),
+            require_json=True,
+        )
         try:
             data = json.loads(raw)
             # 尝试解析双层蓝图
@@ -232,24 +200,24 @@ class AgenticNodesOperator(LegalLLMBase):
 
     def extract_facts(self, current_sub_task: str, raw_retrieved_docs: str,
                       original_query: Optional[str] = None) -> str:
-        system_prompt = """你是法律事实提取器（Extractor）。只从给定文档中抽取与子任务直接相关的原子事实，禁止推理。若无相关信息，回复“未找到相关事实”。"""
-        user_prompt = f"子任务：{current_sub_task}\n文档：\n{raw_retrieved_docs}"
-        if original_query:
-            user_prompt += f"\n[最高指令：确保不偏离原始诉求 -> {original_query}]"
-        return self._call_llm(system_prompt, user_prompt)
+        # 阶段 3：Prompt 来自 prompts.EXTRACTOR_SYSTEM
+        return self._call_messages(
+            prompts.build_extractor_messages(
+                current_sub_task, raw_retrieved_docs, original_query=original_query)
+        )
 
     def reason(self, current_sub_task: str, extracted_facts: str) -> str:
-        system_prompt = """你是法官助理（Reasoner）。严格基于给定事实对子任务进行逻辑推演，不得引入外部知识。"""
-        user_prompt = f"子任务：{current_sub_task}\n事实：{extracted_facts}"
-        return self._call_llm(system_prompt, user_prompt)
+        # 阶段 3：Prompt 来自 prompts.REASONER_SYSTEM
+        return self._call_messages(
+            prompts.build_reasoner_messages(current_sub_task, extracted_facts)
+        )
 
     def generate_final_report(self, user_query: str, accumulated_context: List[Dict]) -> str:
-        system_prompt = """你是资深律师（Generator）。结合已验证的上下文证据链，生成专业、直接回答用户问题的法律意见书。标记计算出的金额。"""
-        context_str = ""
-        for item in accumulated_context:
-            context_str += f"[Hop {item.get('hop')}] {item.get('sub_task', '计算')} -> {item.get('reasoning', item.get('data', ''))}\n\n"
-        user_prompt = f"用户问题：{user_query}\n证据链：\n{context_str}"
-        return self._call_llm(system_prompt, user_prompt, temperature=0.3)
+        # 阶段 3：Prompt 与证据链拼法都来自 prompts.py
+        return self._call_messages(
+            prompts.build_generator_messages(user_query, accumulated_context),
+            temperature=0.3,
+        )
 
     # ====================== 新增方法 (最小侵入) ======================
     def grade_facts(self, task_desc: str, docs: str) -> dict:
@@ -257,15 +225,10 @@ class AgenticNodesOperator(LegalLLMBase):
         Grader：强制 LLM 输出 JSON，包含 status (sufficient/partial/irrelevant)
         如果调用失败，退回默认 irrelevant 状态，保证鲁棒性
         """
-        system_prompt = """你是一个极其严苛的事实调查官。不要推理，只对比资料与任务。
-        输出JSON：
-        {
-          "rationale": "判决说理",
-          "status": "sufficient | partial | irrelevant",
-          "extracted_facts": ["事实1"] (仅在 sufficient/partial 时输出),
-          "missing_info": "缺少的搜索词" (仅在 partial 时输出)
-        }"""
-        raw = self._call_llm(system_prompt, f"任务：{task_desc}\n资料：{docs}", require_json=True)
+        # 阶段 3：Prompt 来自 prompts.GRADER_SYSTEM，与 grader_worker 共用同一份
+        raw = self._call_messages(
+            prompts.build_grader_messages(task_desc, docs), require_json=True
+        )
         try:
             return json.loads(raw)
         except Exception:
@@ -278,22 +241,18 @@ class AgenticNodesOperator(LegalLLMBase):
         虫洞重规划 v2：输出任务列表，每个任务含 task_desc / engine / rationale。
         engine: 'GRAPH_TRAVERSAL' (图游走) 或 'GLOBAL_DENSE_WORMHOLE' (全局向量穿越)
         """
-        system_prompt = f"""你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
-【核心任务】：当前系统的法律检索路径已陷入死胡同，你需要基于全局事实账本，推翻或改写下一步的调查计划。
-
-【可用引擎说明】：
-1. GRAPH_TRAVERSAL（图谱游走）：系统默认引擎。在当前案件领域内寻找相邻线索（成本极低）。
-2. GLOBAL_DENSE_WORMHOLE（虫洞穿越）：当当前图谱已彻底断裂，必须跨法律领域寻找依据时使用（算力消耗极大！连续失败>=3次才建议开启）。
-
-【当前绝境状态】：
-- 系统已连续碰壁次数：{fail_count}
-- 碰壁原因：{fail_log}
-
-严格按照以下 JSON Schema 输出：
-{{"task_queue": [{{"task_desc": "...", "engine": "GRAPH_TRAVERSAL", "rationale": "..."}}]}}
-"""
-        prompt = f"案情：{query}\n已有事实：{global_facts}\n失败记录：{fail_log}"
-        raw = self._call_llm(system_prompt, prompt, require_json=True, temperature=0.4)
+        # 阶段 3：Prompt 来自 prompts.REPLANNER_SYSTEM，与 replanner_worker 共用同一份
+        raw = self._call_messages(
+            prompts.build_replanner_messages(
+                original_query=query,
+                global_facts=global_facts,
+                retry_context={"fail_count": fail_count, "fail_log": fail_log},
+                schema_json='{"task_queue": [{"task_desc": "...", "engine": '
+                            '"GRAPH_TRAVERSAL", "rationale": "..."}]}',
+            ),
+            require_json=True,
+            temperature=0.4,
+        )
         try:
             data = json.loads(raw)
             tasks = data.get("task_queue", [])
@@ -323,30 +282,12 @@ class AgenticNodesOperator(LegalLLMBase):
         生成 Python 计算代码（赔偿金/补偿金/加班费等金额）。
         若 error_context 非空，表示上次代码执行失败，需要修正。
         """
-        chain_text = ""
-        for item in reasoning_chain:
-            chain_text += (f"[{item.get('sub_task', '')}] "
-                           f"事实: {item.get('facts', '')} "
-                           f"推理: {item.get('reasoning', '')}\n")
-
-        correction_hint = ""
-        if error_context:
-            correction_hint = (f"\n【上次执行报错，请修正】\n{error_context}\n"
-                               "请分析错误原因并生成修正后的代码。")
-
-        system_prompt = f"""你是一名精通中国劳动法的法官助理兼Python程序员。
-根据以下案件事实和推理链，编写一段纯 Python 代码来计算最终的赔偿金额。
-
-【代码要求】：
-1. 变量命名清晰，使用中文注释说明每步对应的法律依据
-2. 最终结果必须赋值给变量 `result`
-3. 只输出可执行的 Python 代码，不要包裹在 ```python ``` 中
-4. 不要使用任何外部库（如 requests），只用标准库
-5. 不要进行任何文件读写或网络操作{correction_hint}"""
-
-        user_prompt = f"案件：{user_query}\n\n推理链：\n{chain_text}"
-
-        return self._call_llm(system_prompt, user_prompt, temperature=0.1)
+        # 阶段 3：Prompt 来自 prompts.CODE_GENERATOR_SYSTEM，修正段由构造器拼接
+        return self._call_messages(
+            prompts.build_code_generator_messages(
+                user_query, reasoning_chain, error_context),
+            temperature=0.1,
+        )
 
 # ============================================================================
 # 第三部分：Reasoner 模块（负责检索 + 回答 + 信息充分性判断）
@@ -375,7 +316,8 @@ class Reasoner:
         for sim, nid in zip(sims[0], ids[0]):
             if nid != -1 and sim > 0.6:
                 try:
-                    node = self.legal_graph.graph.vs.find(name=int(nid))
+                    # 阶段 10：图内顶点名恒为 str(int)，FAISS 给的是 int64
+                    node = self.legal_graph.graph.vs.find(name=vname(nid))
                     docs.append(node["content"])
                 except ValueError:
                     pass
@@ -453,65 +395,36 @@ class Reasoner:
         }
 
 # ============================================================================
-# 第四部分：真实 DeepSeek Planner
+# 第四部分：真实 Planner
 # ============================================================================
-DEEPSEEK_API_KEY = "sk-your-real-api-key"   # 替换为你的 Key
-deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+# 阶段 2：原先这里是写死的假 Key（"sk-your-real-api-key"）加模块级客户端，
+# 结果是 import soul 就会持有一个无效凭据，且真实 Key 无法通过配置注入。
+# 改为惰性工厂，统一从 config.yaml 读取。
+_llm_client = None
 
-def call_deepseek_planner(query: str) -> list:
-    """
-    调用 DeepSeek 生成双层蓝图并展平为可执行队列。
-    返回 List[Dict] (task_desc + engine + rationale 格式)
-    """
-    system_prompt = """你是一个顶级的中国法律案件拆解专家与智能体规划中枢。
-【核心任务】：不要回答法律问题！将用户案情拆解为「双层蓝图」。
 
-【双层蓝图输出格式 (严格 JSON)】：
-{
-  "skeleton": {
-    "nodes": [
-      {"id": "1", "abstract": "核实劳动关系", "deps": []},
-      {"id": "2", "abstract": "核查解除合法性", "deps": ["1"]},
-      {"id": "3", "abstract": "计算赔偿金额", "deps": ["2"]}
-    ]
-  },
-  "concretion": {
-    "concretions": {
-      "1": "核实张三自2022年3月与A公司的劳动关系",
-      "2": "核查A公司口头辞退是否违反劳动法第39条",
-      "3": "按工作年限2年、月薪8000计算2N赔偿金"
-    }
-  }
-}
-
-【deps 规则】：若步骤B依赖步骤A的结果，在B的deps中填入A的id。无依赖填[]。
-【abstract 规则】：不包含具体人名/公司名/日期，用通用概念描述。
-"""
-    try:
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"用户案情：{query}"}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1
+def get_llm_client() -> OpenAI:
+    """惰性创建 LLM 客户端（首次调用时才校验凭据）"""
+    global _llm_client
+    if _llm_client is None:
+        api_key = cfg.get("llm", "api_key")
+        if not api_key:
+            raise RuntimeError(
+                "未配置 LLM API Key，无法调用 LLM。"
+                "请设置环境变量 DEEPSEEK_API_KEY（参考 .env.example）。"
+            )
+        _llm_client = OpenAI(
+            api_key=api_key,
+            base_url=cfg.get("llm", "base_url", default="https://api.deepseek.com"),
         )
-        raw = response.choices[0].message.content
-        data = json.loads(raw)
+    return _llm_client
 
-        # 解析双层蓝图 → 展平为执行队列
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-        from double_layer_plan import parse_double_layer_plan
-        plan = parse_double_layer_plan(data)
-        flat = plan.to_flat_task_queue(respect_deps=True)
-        logger.info(f"双层蓝图: {len(plan.skeleton.nodes)} 节点 DAG → {len(flat)} 步拓扑队列")
-        return flat
 
-    except Exception as e:
-        logger.error(f"DeepSeek Planner 调用失败: {e}")
-        return [{"task_desc": "查核基础法律事实", "engine": "GRAPH_TRAVERSAL", "rationale": "兜底"}]
+# 阶段 7：已删除 call_deepseek_planner()。
+# 它是阶段 3 之前的死代码——node_planner 早已改走 agentic_ops.generate_plan()，
+# 该函数无任何调用方，却自成一套「调 LLM + 解析双层蓝图 + 展平队列」的实现，
+# 且内部靠 sys.path.insert 做动态导入。留着只会与 AgenticNodesOperator.generate_plan
+# 形成第二份真源，故整体移除（需要时见 git 历史）。
 
 
 # ============================================================================
@@ -561,9 +474,16 @@ def node_l0_gateway(state: AgentState) -> dict:
     }
 
 
-def node_planner(state: AgentState) -> dict:
-    logger.info("Planner 启动，调用 DeepSeek 生成执行计划")
-    queue = call_deepseek_planner(state["user_query"])
+def node_planner(state: AgentState, agentic_ops: "AgenticNodesOperator") -> dict:
+    """
+    Planner 节点：用注入的 agentic_ops 生成执行计划。
+
+    阶段 3：改走 agentic_ops.generate_plan()，复用 prompts.py 的模板与同一个
+    LLM 客户端。原先这里调模块级 call_deepseek_planner()，等于存在第二份
+    Planner 实现，而且它自带一个独立客户端，测试桩无法替换。
+    """
+    logger.info("Planner 启动，生成执行计划")
+    queue = agentic_ops.generate_plan(state["user_query"])
     return {"task_queue": queue}
 
 
@@ -572,8 +492,9 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
         return {}
     # ---- 熔断保护 ----
     depth = state.get("recursion_depth", 0)
-    if depth > 5:
-        logger.warning("🚨 触发算力熔断，强制终止")
+    max_depth = cfg.get("agent", "max_recursion_depth", default=5)
+    if depth > max_depth:
+        logger.warning(f"🚨 触发算力熔断（depth={depth} > {max_depth}），强制终止")
         return {"retry_context": {"status": "force_stop"}}
 
     current_task = state["task_queue"][0]
@@ -680,18 +601,19 @@ def node_replanner(state: AgentState) -> dict:
         )
         replan_target = failed_desc if failed_desc else state["user_query"]
 
-        system_prompt = f"""你是一个经过强化学习训练的顶级重规划引擎。
-当前子任务检索已陷入死胡同。连续碰壁次数：{fail_count}。碰壁原因：{obs_text[-300:]}。
-可用引擎：GRAPH_TRAVERSAL (图游走) / GLOBAL_DENSE_WORMHOLE (虫洞穿越)。
-严格输出JSON：{{"task_queue":[{{"task_desc":"...","engine":"GRAPH_TRAVERSAL","rationale":"..."}}]}}"""
+        # 阶段 3：Prompt 来自 prompts.REPLANNER_SYSTEM，与 Replanner Worker 共用同一份
+        replan_messages = prompts.build_replanner_messages(
+            original_query=replan_target,
+            global_facts=state.get("global_facts", []),
+            retry_context={"fail_count": fail_count, "fail_log": obs_text[-300:]},
+            schema_json='{"task_queue": [{"task_desc": "...", "engine": '
+                        '"GRAPH_TRAVERSAL", "rationale": "..."}]}',
+        )
         try:
-            # 使用模块级 deepseek_client（兼容 soul.py 独立运行时无 agentic_ops 的场景）
-            resp = deepseek_client.chat.completions.create(
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"失败子任务：{replan_target}\n已有全局事实：{state.get('global_facts',[])}\n原始问题（参考）：{state['user_query'][:100]}"}
-                ],
+            # 使用惰性客户端（兼容 soul.py 独立运行时无 agentic_ops 的场景）
+            resp = get_llm_client().chat.completions.create(
+                model=cfg.get("llm", "judge_model", default="deepseek-chat"),
+                messages=replan_messages,
                 response_format={"type": "json_object"},
                 temperature=0.4, max_tokens=2048
             )
@@ -712,18 +634,14 @@ def node_replanner(state: AgentState) -> dict:
         # 新任务替换队列头，保留队列尾部（其他未执行的子任务）
         new_queue = new_tasks + queue[1:]
     else:
-        # 情况3：硬规则补充 —— 只追加到队列头部，保留未执行的尾部任务
+        # 情况3：硬规则补充
+        # 规则表来自 replanner_rules.py，与 Replanner Worker 共用同一份。
+        # 与 Worker 路径的差别：这里只做"追加"，不做 LLM 重规划。
         new_queue = list(queue)
-        if "未签订劳动合同" in obs_text:
-            has_double = any(
-                (t.get("task_desc","") if isinstance(t, dict) else str(t)).find("双倍工资") >= 0
-                for t in queue
-            )
-            if not has_double:
-                new_queue = [
-                    {"task_desc": "核查未签劳动合同二倍工资仲裁时效", "engine": "GRAPH_TRAVERSAL", "rationale": "硬规则"},
-                    {"task_desc": "合并计算二倍工资差额与违法解除赔偿金", "engine": "GRAPH_TRAVERSAL", "rationale": "硬规则"},
-                ] + new_queue
+        hard_tasks = apply_hard_rules(obs_text, queue, logger)
+        if hard_tasks:
+            logger.info(f"硬规则补充 {len(hard_tasks)} 条任务")
+            new_queue = hard_tasks + new_queue
 
     return {"task_queue": new_queue, "retry_context": {}}
 
@@ -783,103 +701,45 @@ def node_write_code(state: AgentState, agentic_ops: AgenticNodesOperator) -> dic
 
 
 def node_execute_code(state: AgentState) -> dict:
-    """在 Docker 沙箱中执行代码"""
+    """
+    执行沙箱阶段生成的代码。
+
+    阶段 5：Docker 优先 + 本进程降级的逻辑统一收敛到
+    legal_sandbox/sandbox_exec.py，本节点只负责"按熔断策略决定要不要重试"。
+    """
     logger.info("🐳 沙箱阶段: 执行计算代码")
 
     code = state.get("generated_code", "")
     if not code:
         return {"retry_context": {"sandbox_error": "无代码可执行"}}
 
-    # 尝试使用 Docker 沙箱，失败则回退本地执行
-    try:
-        import sys, os
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "legal_sandbox"))
-        from sandbox_manager import DockerSandboxManager
+    outcome = run_code_once(code, session_id=state.get("sandbox_session_id"))
 
-        session_id = state.get("sandbox_session_id")
-        manager = DockerSandboxManager()
-
-        if not session_id:
-            try:
-                session_id = manager.start_session()
-            except Exception as e:
-                logger.warning(f"沙箱容器创建失败: {e}，回退本地执行")
-                return _execute_locally(state, code)
-
-        result = manager.execute_code(session_id, code)
-
-        if result.get("error"):
-            logger.warning(f"沙箱执行报错: {result['error']}")
-            retries = state.get("sandbox_retries", 0) + 1
-            if retries < 3:
-                return {
-                    "retry_context": {"sandbox_error": result["error"]},
-                    "sandbox_retries": retries,
-                    "sandbox_session_id": session_id
-                }
-            # 超过重试上限，记录错误继续
-            return {
-                "calc_result": f"沙箱多次执行失败: {result['error']}",
-                "sandbox_session_id": session_id
-            }
-
-        logger.info(f"沙箱执行成功: {result.get('output', '')[:100]}")
-        return {
-            "calc_result": result.get("output", "").strip(),
-            "sandbox_session_id": session_id
-        }
-
-    except ImportError:
-        logger.warning("Docker SDK 不可用，回退本地执行")
-        return _execute_locally(state, code)
-
-
-def _execute_locally(state: AgentState, code: str) -> dict:
-    """本地安全执行 Python 代码（受限环境回退方案）"""
-    import io, sys as _sys, traceback
-
-    old_stdout = _sys.stdout
-    redirected = io.StringIO()
-    _sys.stdout = redirected
-
-    error_msg = None
-    # 受限的全局命名空间
-    safe_globals = {
-        "__builtins__": {
-            "abs": abs, "min": min, "max": max, "sum": sum,
-            "round": round, "int": int, "float": float,
-            "len": len, "range": range, "list": list,
-            "dict": dict, "str": str, "bool": bool,
-            "True": True, "False": False, "None": None,
-            "print": print, "isinstance": isinstance,
-        }
-    }
-
-    try:
-        exec(code, safe_globals)
-        result_value = safe_globals.get("result", "未定义 result 变量")
-    except Exception:
-        error_msg = traceback.format_exc()
-    finally:
-        _sys.stdout = old_stdout
-
-    output = redirected.getvalue().strip()
-    if error_msg:
+    if outcome["error"]:
+        logger.warning(f"沙箱执行报错（via={outcome['via']}）: {outcome['error']}")
         retries = state.get("sandbox_retries", 0) + 1
-        if retries < 3:
+        max_retries = cfg.get("sandbox", "max_retries", default=3)
+        if retries < max_retries:
             return {
-                "retry_context": {"sandbox_error": error_msg},
-                "sandbox_retries": retries
+                "retry_context": {"sandbox_error": outcome["error"]},
+                "sandbox_retries": retries,
+                "sandbox_session_id": outcome["session_id"],
             }
-        return {"calc_result": f"执行失败: {error_msg}"}
+        # 重试耗尽：必须清掉 sandbox_error 并把计数钉在 max_retries。
+        # 否则 route_after_execute 的判定条件（retry_context 里残留 sandbox_error
+        # 且 sandbox_retries 未推进）会一直成立，导致 ExecuteCode↔WriteCode 死循环。
+        return {
+            "calc_result": f"沙箱多次执行失败: {outcome['error']}",
+            "sandbox_session_id": outcome["session_id"],
+            "retry_context": {},
+            "sandbox_retries": max_retries,
+        }
 
-    # 提取 result 变量值
-    try:
-        result_str = str(safe_globals.get("result", output or "计算完成"))
-    except Exception:
-        result_str = output or "计算完成"
-
-    return {"calc_result": result_str}
+    logger.info(f"沙箱执行成功（via={outcome['via']}）: {str(outcome['calc_result'])[:100]}")
+    return {
+        "calc_result": outcome["calc_result"],
+        "sandbox_session_id": outcome["session_id"],
+    }
 
 
 def node_inject_calc_result(state: AgentState) -> dict:
@@ -900,18 +760,10 @@ def node_inject_calc_result(state: AgentState) -> dict:
 
 
 def node_cleanup_sandbox(state: AgentState) -> dict:
-    """清理沙箱资源"""
+    """清理沙箱资源（走 sandbox_exec 的统一入口，幂等）"""
     session_id = state.get("sandbox_session_id")
     if session_id:
-        try:
-            import sys, os
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "legal_sandbox"))
-            from sandbox_manager import DockerSandboxManager
-            manager = DockerSandboxManager()
-            manager.destroy_session(session_id)
-            logger.info(f"沙箱 {session_id} 已销毁")
-        except Exception as e:
-            logger.warning(f"沙箱清理异常: {e}")
+        destroy_sandbox_session(session_id)
     return {"sandbox_session_id": None}
 
 
@@ -923,7 +775,7 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
 
     # 闭包注入依赖
     def l0_gateway(state): return node_l0_gateway(state)
-    def planner(state): return node_planner(state)
+    def planner(state): return node_planner(state, agentic_ops)
     def executor(state): return node_executor(state, reasoner)
     def replanner(state): return node_replanner(state)
     def generate(state): return node_generate(state, agentic_ops)
@@ -972,10 +824,15 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
 
     # ExecuteCode 后判断是否需要重试
     def route_after_execute(state: AgentState):
+        # 已有结果（执行成功、或重试已耗尽并放弃）-> 直接注入。
+        # 这是终止条件的权威判据，避免 retry_context 残留导致死循环。
+        if state.get("calc_result"):
+            return "InjectResult"
         retry_ctx = state.get("retry_context", {})
         sandbox_retries = state.get("sandbox_retries", 0)
-        if "sandbox_error" in retry_ctx and sandbox_retries < 3:
-            logger.info(f"沙箱重试 {sandbox_retries}/3")
+        max_retries = cfg.get("sandbox", "max_retries", default=3)
+        if "sandbox_error" in retry_ctx and sandbox_retries < max_retries:
+            logger.info(f"沙箱重试 {sandbox_retries}/{max_retries}")
             return "WriteCode"
         return "InjectResult"
 
@@ -992,36 +849,53 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
 # 第七部分：运行示例
 # ============================================================================
 if __name__ == "__main__":
+    # Windows 控制台默认 GBK，而观察记录里含 emoji（如 ⚠️/🐳），
+    # 直接 print 会抛 UnicodeEncodeError。这里把 stdout 切到 UTF-8。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     # 1. 模拟图谱（实际应用请加载真实数据）
-    graph_engine = LegalDenseGraphBuilder(embedding_dim=768)
+    # 使用 from_config() 保证维度与 config.yaml 的 embedding.dimension 一致
+    graph_engine = LegalDenseGraphBuilder.from_config()
     dummy_nodes = [
         {"id": 1, "content": "试用期不符合录用条件可解除合同。", "type": "Raw", "metadata": {"source": "劳动法"}},
         {"id": 2, "content": "违法解除劳动合同按经济补偿标准的二倍支付赔偿金。", "type": "Raw", "metadata": {"source": "劳动法"}},
     ]
-    dummy_emb = np.random.randn(len(dummy_nodes), 768).astype(np.float32)
+    dummy_emb = np.random.randn(len(dummy_nodes), graph_engine.dim).astype(np.float32)
     dummy_emb = dummy_emb / np.linalg.norm(dummy_emb, axis=1, keepdims=True)
     graph_engine.build_initial_graph_batch(dummy_nodes, dummy_emb)
 
     # 2. 模拟 Embedding 函数
     def mock_embedding(text: str) -> np.ndarray:
-        v = np.random.randn(768).astype(np.float32)
+        v = np.random.randn(graph_engine.dim).astype(np.float32)
         return v / np.linalg.norm(v)
 
     # 3. 模拟 AgenticNodesOperator（包含新增方法）
     class MockAgenticOps(AgenticNodesOperator):
-        def _call_llm(self, system_prompt, user_prompt, require_json=False, temperature=0.1):
+        """阶段 3：改为覆写 _call_messages（Prompt 已统一走 prompts.py 构造器）"""
+
+        def _call_messages(self, messages, require_json=False, temperature=0.1):
+            system_prompt = messages[0]["content"] if messages else ""
             logger.info(f"Mock LLM called with: {system_prompt[:50]}...")
             if require_json:
-                if "grade" in system_prompt.lower() or "事实调查官" in system_prompt:
+                if "事实调查官" in system_prompt:
                     return '{"rationale": "Mock充足", "status": "sufficient", "extracted_facts": ["Mock事实1"]}'
-                if "replan" in system_prompt.lower() or "重规划" in system_prompt:
-                    return '{"task_queue": ["[WORMHOLE] Mock全局检索"]}'
-                return '{"strategy_queue": ["检查劳动关系", "核实辞退理由", "计算赔偿金额"]}'
-            if "extract" in system_prompt:
+                if "重规划引擎" in system_prompt:
+                    return ('{"task_queue": [{"task_desc": "Mock全局检索", '
+                            '"engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "Mock"}]}')
+                # Meta-Planner：返回双层蓝图
+                return ('{"skeleton": {"nodes": [{"id": "1", "abstract": "核实劳动关系", "deps": []}, '
+                        '{"id": "2", "abstract": "核实解除合法性", "deps": ["1"]}, '
+                        '{"id": "3", "abstract": "计算赔偿金额", "deps": ["2"]}]}, '
+                        '"concretion": {"concretions": {"1": "核实劳动关系", '
+                        '"2": "核实辞退是否合法", "3": "计算赔偿金额"}}}')
+            if "Extractor" in system_prompt:
                 return "Mock 提取事实：公司口头辞退，属于违法解除。"
-            if "reason" in system_prompt:
+            if "Reasoner" in system_prompt:
                 return "Mock 推理：根据事实，应支付双倍赔偿金。"
-            if "generate" in system_prompt:
+            if "Generator" in system_prompt:
                 return "Mock 最终报告：您可以获得2N赔偿金。"
             return "Mock 回答"
 
