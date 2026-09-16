@@ -94,13 +94,15 @@ C_q 才绑定当前案情。`double_layer_plan.py` 提供 Schema + **环检测**
 | **接入/路由** | `query.py` | `UnifiedQueryRouter_Query`：三层漏斗。L0 正则拦截 Prompt 注入；L1 语义缓存（阈值 0.98）+ 长度/语义规则；L2 用 LLM 兜底分类为 `CHITCHAT` / `SIMPLE_QA` / `COMPLEX_TASK` |
 | | `multiple-search/SemanticCache/engine.py` | 语义缓存：`redisvl` 向量索引；**未装 redisvl 或连不上 Redis 时自动退回 `InMemoryVectorStore`**，不阻断主流程 |
 | **Agent 编排** | `multiple-search/soul.py` | LangGraph 9 节点 FSM：`L0_Gateway → Planner → Executor → Grader → Replanner → Generate → WriteCode → ExecuteCode → InjectResult → Cleanup` |
+| **持久化执行** | `agent_runtime/` | 检查点工厂（sqlite/Redis）/ **双表幂等台账** / 任务总线（Kafka 旁路 + 内存实现）/ `DispatchTask`·`AwaitTask` 节点 / 兜底 `recoverer`。解决"挂起等远端结果 + 重启不重复副作用" |
 | **异步 Worker** | `asynchronization/workers/` | 5 个独立进程：planner / retriever / grader / replanner / reasoner，靠 Kafka Topic 串联 |
 | | `asynchronization/kafka_utils.py` | Topic/Group/acks/compression 全部读配置；`quarantine_message()` 把毒消息写 DLQ 而不中断流水 |
 | | `asynchronization/state_manager.py` | Redis 状态脱水（大对象不塞进 Kafka 消息） |
 | **知识图谱** | `dataset/graph.py` | 核心图引擎：建图、增量挂载、tombstone 软删 + 脏传播、摘要生成/夜间重算、FAISS 检索 |
 | | `dataset/IncrementalMemoryManager.py` | **GMM 动态阈值**决定新知识挂到哪个簇；孤儿节点建新簇 |
 | | `dataset/memory_graph_bridge.py` | 双写桥接：一次编码同时喂 GMM 与 igraph，保证两系统 ID/向量一致 |
-| | `dataset/chunk.py` / `prepare_corpus.py` | PyMuPDF 抽文本 → 规则分块 → 批量向量化注入 |
+| | `dataset/chunk.py` | PDF 抽文本（PyMuPDF）→ **规则分块**（按空行/句末切分 + 最小长度合并） |
+| | `dataset/prepare_corpus.py` | 语料入库：文本目录 → `nodes.jsonl` + `vectors.npy`（行序严格对齐，ID 强制为 int） |
 | **模型训练** | `model/training/*.py` | 4 条训练流水线（见 §6） |
 | | `model/data/evol_instruct.py` | Evol-Instruct 数据工厂 |
 | | `model/utils/unsloth_loader.py` / `vllm_engine.py` | 4-bit QLoRA 加载器；vLLM 后端 + 自动回退 API |
@@ -110,6 +112,11 @@ C_q 才绑定当前案情。`double_layer_plan.py` 提供 Schema + **环检测**
 | | `replanner_rules.py` | 7 条硬规则，**两条链路共用** |
 | | `double_layer_plan.py` | 双层蓝图 Schema（含 DAG 环检测）|
 | | `benchmark.py` | HR@K / MRR / NoiseRatio + 轨迹评分 |
+| **契约与验证** | `docs/CONTRACTS.md` | **接口契约冻结**：状态字段 / Kafka 消息 / 路由 / LLM 接缝 / 沙箱返回 / LangGraph 恢复语义 |
+| | `tools/ci.py` | 一键回归：入口体检 + compileall + pytest + 离线 demo + P0 spike |
+| | `tools/audit_entrypoints.py` | 入口点体检：**导入不得产生副作用** + 离线可跑性矩阵 |
+| | `tests/harness.py` | 离线沙盘：可编程假 LLM / 内存 Kafka / 脚本化编码器 / 图装配 |
+| | `spikes/spike_checkpoint_resume.py` | Checkpointer go/no-go（6 项验证，含跨进程恢复） |
 
 ---
 
@@ -257,6 +264,23 @@ C_q 才绑定当前案情。`double_layer_plan.py` 提供 Schema + **环检测**
 | **轨迹评分** | $Score_{traj} = w_1 \cdot \mathbb{I}(Plan_{optimal}) + w_2 \cdot (1 - \frac{Retries}{Max_{retries}}) + w_3 \cdot Acc_{final}$ |
 | **深度探针** | **Graph-NIAH**：人工埋「极度隐蔽的跳板节点」，强制 Retriever 走 $Node_A \to Node_B \to Node_C$ 才能拿到核心证据，用于精确测量游走深度与**召回衰减率** |
 
+### 因果评测基准（`benchmark_causal/`，2026-09 新增）
+
+在上述检索/轨迹指标之外，另建了一套**基于 Pearl 因果之梯**的评测：
+
+| 层 | 设问 | 标准答案来源 |
+|---|---|---|
+| L1 观测 | 给定完整事实 → 问结论 | **确定性 SCM 推导** |
+| L2 干预 | $do(X=x)$ 后 → 问结论 | 同源（图手术：X 固定、方程跳过、下游重算） |
+| L3 反事实 | 翻转已发生变量 → 问结论 | 同源（双变量干预可做"隔离混杂因子"题） |
+| L3′ 抗扰动 | 同上但塞入无关细节 | 与 L3 **完全相同** |
+
+* **三层答案同源** → 天然自洽，不会因标准答案互相矛盾而冤判模型
+* **评分第一原则**：能用 Python 判的绝不交给 LLM。法条存在性、**时效性（法不溯及既往）**、
+  格式、金额精确匹配都是确定性硬门禁；只有「因果链命中率」「混杂因子是否隔离」才用裁判
+* **度量**：因果一致性率（L1∧L2∧L3 全对才计 1）、反事实抗扰动率、分层通过率
+* **法条语料**：1428 条 / 9 部法，含 valid_from / valid_to；来源 `LawRefBook/Laws`
+
 ---
 
 ## 9. 配置与运行
@@ -327,4 +351,4 @@ python dataset/memory_graph_bridge.py          # 双写桥接
 | `sandbox_server.py` | 执行服务本身缺**超时与输出大小上限**（超时目前靠 `sandbox_manager` 的 HTTP 10s 兜） |
 | `k8s_worker_deployment.yaml` | 未设 `securityContext`（runAsNonRoot / readOnlyRootFilesystem / drop capabilities） |
 | `_count_active_children` | 每次遍历全图 `O(N)`，大图下可改用度数缓存 |
-| igraph 顶点名 | 已统一为 `str`，但若未来接入**非数字 ID 语料**，`as_num_id()` 会拒绝 —— 需在 `prepare_corpus` 阶段就规范 ID |
+| igraph 顶点名 | 已统一为 `str`，但若未来接入**非数字 ID 语料**，`as_num_id()` 会拒绝。P0 起 `dataset/prepare_corpus.py` **强制生成 int ID**，该风险已从源头收窄 |

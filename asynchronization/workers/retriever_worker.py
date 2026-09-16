@@ -128,8 +128,11 @@ def retrieve_docs(engine: LegalDenseGraphBuilder, query: str,
     GLOBAL_DENSE_WORMHOLE : 只做全局稠密召回（语义边不参与，用于跨领域找依据）
     """
     if engine.index.ntotal == 0:
-        logger.warning("图引擎索引为空（FAISS 0 条），检索结果必然为空。"
-                       "请先执行 dataset/prepare_corpus.py + build_initial_graph_batch 注入语料。")
+        logger.warning(
+            "图引擎索引为空（FAISS 0 条），检索结果必然为空。"
+            "请先注入语料：python dataset/prepare_corpus.py --corpus-dir <目录> "
+            "--out dataset/corpus_out，再把产物交给 "
+            "LegalDenseGraphBuilder.build_initial_graph_batch()。")
         return []
 
     try:

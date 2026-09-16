@@ -26,6 +26,9 @@ outputs/
 htmlcov/
 coverage.xml
 
+# ---- spike 运行产物（正常情况下落在临时目录，这里是兜底）----
+spikes/.spike_*
+
 # ---- 模型权重与向量数据（体积大，建议用 DVC / 对象存储管理）----
 saved_loras/
 RAG_data/

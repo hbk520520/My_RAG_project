@@ -1,6 +1,6 @@
 # My_RAG_project — 法律智能体 RAG-plus
 
-> 从基础 RAG 演进为 Plan-and-Replan 法律智能体系统
+> 从基础 RAG 演进为 **Plan-and-Replan 法律智能体系统**，并补上持久化执行内核与因果评测基准
 
 📄 **完整项目介绍（技术选型 / 分层架构 / 整体规划 / 训练与评测 / 工程化现状）：见 [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)**
 
@@ -8,34 +8,36 @@
 
 ```
 .
-├── config.yaml                    # 🆕 统一配置中心 (含VLLM自部署配置)
-├── config_loader.py               # 🆕 配置加载器 (${ENV_VAR} 替换)
-├── prompts.py                     # 🆕 Prompt 模板库 (11种场景)
-├── observability.py               # 🆕 可观测性 (Metrics/健康检查/DLQ/指数退避)
+├── config.yaml                    # 统一配置中心 (含 VLLM 自部署配置)
+├── config_loader.py               # 配置加载器 (${ENV_VAR:-默认值} 替换)
+├── prompts.py                     # Prompt 单一真源 (13 个模板 + 10 个构造器)
+├── observability.py               # 可观测性 (Metrics/健康检查/DLQ/指数退避)
 ├── query.py                       # 路由层: UnifiedQueryRouter_Query (三层漏斗)
 ├── benchmark.py                   # 评测层: 检索/轨迹/Graph-NIAH
-├── double_layer_plan.py           # 🆕 双层蓝图 Schema (S_q DAG + C_q 具象化)
-├── training_data_guide.py         # 🆕 训练数据工程化建议
+├── double_layer_plan.py           # 双层蓝图 Schema (S_q DAG + C_q 具象化)
+├── replanner_rules.py             # 硬规则表 (soul.py 与 replanner_worker 共用一份)
+├── replanner_rules_report.py      # 规则覆盖度报告
+├── training_data_guide.py         # 训练数据工程化建议
 │
 ├── dataset/                       # 知识图谱层
-│   ├── chunk.py                   # PDF 提取 + 语义分块
+│   ├── chunk.py                   # PDF 提取 + 规则分块（按空行/句末切分 + 最小长度合并）
 │   ├── graph.py                   # 核心图引擎 (BGE-M3 + FAISS-HNSW + LoRA)
 │   ├── IncrementalMemoryManager.py # GMM 动态阈值增量记忆
-│   ├── memory_graph_bridge.py     # 🆕 桥接: GMM记忆 ↔ igraph图引擎
-│   └── prepare_corpus.py          # 批量向量化注入
+│   ├── memory_graph_bridge.py     # 桥接: GMM 记忆 ↔ igraph 图引擎
+│   └── prepare_corpus.py          # 语料入库: 文本 → nodes.jsonl + vectors.npy
 │
 ├── asynchronization/              # 异步编排层 (Kafka + Redis)
-│   ├── kafka_utils.py             # Kafka Producer/Consumer (5个Topic)
+│   ├── kafka_utils.py             # Kafka Producer/Consumer (5 个 Topic)
 │   ├── state_manager.py           # Redis 状态脱水/复水
 │   ├── Dockerfile.worker          # 统一 Worker 镜像
 │   ├── entrypoint.sh              # 按 WORKER_TYPE 分发
 │   ├── k8s_worker_deployment.yaml # K8s 部署配置
 │   └── workers/
-│       ├── planer-worker.py       # Meta-Planner Worker
-│       ├── retriever_worker.py    # 图检索 Worker
-│       ├── grader_worker.py       # 🆕 Grader Worker
-│       ├── replanner_worker.py    # 🆕 Replanner Worker (v2 Pydantic)
-│       └── reasoner_worker.py     # 🆕 Reasoner Worker
+│       ├── planner_worker.py      # Meta-Planner Worker
+│       ├── retriever_worker.py    # 图检索 Worker（向量召回 + 图游走）
+│       ├── grader_worker.py       # Grader Worker
+│       ├── replanner_worker.py    # Replanner Worker
+│       └── reasoner_worker.py     # Reasoner Worker（含内联沙箱）
 │
 ├── multiple-search/               # 多智能体推理层
 │   ├── soul.py                    # LangGraph 主控 (含沙箱闭环)
@@ -45,20 +47,48 @@
 │       ├── Dockerfile             # 沙箱镜像
 │       ├── sandbox_server.py      # FastAPI 执行服务
 │       ├── sandbox_manager.py     # Docker 调度器
-│       └── example_usage.py       # 集成示例
+│       ├── sandbox_exec.py        # 执行统一入口 (soul.py 与 reasoner_worker 共用)
+│       └── example_usage.py       # 沙箱集成示例（离线可跑）
 │
-└── model/                         # 训练层
-    ├── data/
-    │   └── evol_instruct.py       # 🆕 Evol-Instruct 数据工厂 (合并)
-    ├── training/
-    │   ├── train_meta_planner.py  # Meta-Planner SFT + DTW筛选
-    │   ├── train_replanner_grpo.py# 🆕 Replanner GRPO 淘汰赛制
-    │   ├── train_extractor_grader.py# Extractor+Grader DPO
-    │   ├── train_reasoner.py      # Reasoner 长上下文 SFT
-    │   └── train_retriever.py     # BGE-M3 LoRA 微调
-    └── utils/
-        ├── unsloth_loader.py      # 🆕 Unsloth 通用加载器
-        └── vllm_engine.py         # 🆕 VLLM 自部署推理 (prefix caching)
+├── agent_runtime/                 # 持久化执行内核（检查点 / 幂等台账 / 任务总线 / 兜底恢复）
+│   ├── contracts.py               # 任务契约 (TaskRequest / TaskResult / 状态机)
+│   ├── checkpointer.py            # sqlite / Redis / memory 检查点工厂
+│   ├── ledger.py                  # 双表幂等台账 (attempts + dispatched)
+│   ├── taskbus.py                 # 任务总线 (Kafka 旁路 + 内存/文件实现)
+│   ├── nodes.py                   # DispatchTask / AwaitTask 节点
+│   ├── recoverer.py               # 兜底驱动：结果回收 + 超时补偿
+│   └── run_demo.py                # 离线演示（挂起 / 跨进程恢复 / 幂等）
+│
+├── benchmark_causal/              # 因果评测基准（见下节）
+│   ├── schemas.py / scm.py / scm_labor.py / scenarios.py
+│   ├── legal_corpus.py            # 法条存在性 + 时效性判定
+│   ├── generator.py / gates.py    # L1/L2/L3 出题 + 硬门禁打分
+│   ├── build_corpus.py            # 从 LawRefBook/Laws 构建语料
+│   ├── run_demo.py                # 离线演示
+│   └── data/legal_corpus.jsonl    # 已入库：1428 条 / 9 部法
+│
+├── model/                         # 训练层（P9，暂挂起）
+│   ├── data/evol_instruct.py      # Evol-Instruct 数据工厂
+│   ├── training/                  # 5 个训练脚本 (SFT / DPO / GRPO / LoRA)
+│   └── utils/
+│       ├── unsloth_loader.py      # Unsloth 通用加载器
+│       └── vllm_engine.py         # VLLM 自部署推理 (prefix caching)
+│
+├── tests/                         # 测试（全部离线可跑）
+│   ├── conftest.py                # 统一 sys.path 引导 + 公共夹具
+│   ├── harness.py                 # 假 LLM / 内存 Kafka / 脚本化编码器
+│   └── ...
+│
+├── tools/
+│   ├── ci.py                      # ⭐ 一键回归（先跑这个）
+│   └── audit_entrypoints.py       # 入口点导入安全性体检
+│
+├── spikes/
+│   └── spike_checkpoint_resume.py # LangGraph 检查点/恢复 go-no-go 验证
+│
+└── docs/
+    ├── CONTRACTS.md               # ⭐ 接口契约（改契约必须同步改它）
+    └── PROJECT_OVERVIEW.md        # 项目全貌介绍
 ```
 
 ## 快速开始
@@ -69,22 +99,66 @@ pip install -r requirements-dev.txt      # 追加测试依赖（pytest）
 pip install -r requirements-train.txt    # 训练 / GPU 侧（unsloth / vllm）
 
 cp .env.example .env                     # 填入 DEEPSEEK_API_KEY 等
-python -m pytest                         # 187 个单元/集成测试，全部离线可跑
 ```
 
-四个可以直接跑的离线示例（**不联网、不下载模型**）：
+### 一条命令跑完所有验证
 
 ```bash
-python -m pytest
+python tools/ci.py
+```
+
+它会依次跑五类检查，任一失败即退出码非 0：
+
+| 步骤 | 内容 | 为什么不能省 |
+|---|---|---|
+| 1. 入口点体检 | 每个入口 `import` 都不得有副作用 | "import 即副作用"是本项目反复出问题的一类 |
+| 2. compileall | 全仓语法/字节码编译 | — |
+| 3. pytest | **325+** 个单元 + 端到端测试 | — |
+| 4. 离线 demo | 每个子系统的 `__main__` **真跑一遍** | `compileall` 通过 ≠ 能跑 |
+| 5. 持久化 spike | LangGraph 检查点 / 跨进程恢复 / 幂等 | 持久化执行的地基 |
+
+> 第 1 步的必要性有三次实例：阶段 2 的 `import soul` 就持有写死的假 API Key；
+> 阶段 6 的 `training_data_guide.py` 顶层 `print`；P0 的 `example_usage.py`
+> 模块级 `DockerSandboxManager()`（无 Docker 的环境连 import 都失败）。
+> **`compileall` 与 `pytest` 都抓不到这类问题** —— pytest 走 conftest 已经铺好环境。
+
+单独跑体检：
+
+```bash
+python tools/audit_entrypoints.py          # 完整矩阵：导入安全性 + 离线可跑性
+python tools/audit_entrypoints.py --check  # 只跑断言（CI 用）
+```
+
+也可以单独跑某个离线示例（**不联网、不下载模型、不要 API key**）：
+
+```bash
 python multiple-search/soul.py                  # LangGraph 全链路（Mock AgenticOps）
 python dataset/graph.py                         # 图引擎：建图/删除/摘要重算/最大值截断
 python dataset/IncrementalMemoryManager.py      # GMM 动态阈值 + 新簇创建
 python dataset/memory_graph_bridge.py           # GMM ↔ 图引擎双写
+python benchmark_causal/run_demo.py             # 因果评测：法条体检 + L1/L2/L3 出题 + 打分
+python multiple-search/legal_sandbox/example_usage.py   # 沙箱工具返回契约（成功/失败）
+python agent_runtime/run_demo.py                # 持久化执行：挂起 / 跨进程恢复 / 幂等
+python spikes/spike_checkpoint_resume.py        # 检查点/恢复可行性（6 项验证）
+```
+
+语料入库（把一批法律文本变成图引擎能吃的节点 + 向量）：
+
+```bash
+python dataset/prepare_corpus.py --corpus-dir ./laws --out ./dataset/corpus_out --stub-encoder
+# 去掉 --stub-encoder 即改用 BGE-M3 真实编码（首次会下载约 2GB）
+python dataset/chunk.py <文件.pdf>              # 单独的 PDF → 语义分块
 ```
 
 > 离线示例的秘诀是 `dataset/graph.py` 里的 `StubEncoder` / `make_offline_engine()`：
 > 注入一个「同文本必得同向量」的假编码器，从而完全绕开 BGE-M3（约 2GB）下载。
 > 生产路径仍然用 `BGEM3FlagModel`，只在真正需要编码时才懒加载。
+>
+> 端到端测试用的是 `tests/harness.py::ScriptedEncoder` —— 它**按关键词主题**分桶，
+> 让「检索到哪一条法条」变成可断言的事实。`StubEncoder` 做不到这点：它的向量两两
+> 近乎正交，会被 `Reasoner.retrieve` 的 `sim > 0.6` 全部滤掉，happy path 根本测不到。
+
+**接口契约在 `docs/CONTRACTS.md`** —— 改契约必须同步改文档 + 实现 + 测试。
 
 ## 数据流
 
@@ -97,7 +171,178 @@ python dataset/memory_graph_bridge.py           # GMM ↔ 图引擎双写
                 → Replanner (失败→虫洞) → Generate → WriteCode → ExecuteCode(沙箱)
 ```
 
+需要等远端长任务时，主图**不阻塞等待**，而是走持久化执行旁路：
+
+```
+Executor/AwaitTask ──派发──> TaskBus (topic.task.pending)
+      │                            │
+   interrupt()                     │ 远端执行
+      │                            ▼
+   挂起（进程可退出）          结果回传 (topic.task.result)
+      │                            │
+      └──── Command(resume=...) <──┘        由 recoverer 兜底驱动
+                （可在另一个进程）
+```
+
 ---
+
+## 持久化执行内核（`agent_runtime/`）
+
+> **要解决的问题**：Agent 调一个远端工具可能几十秒到几分钟。**不能阻塞进程干等**，
+> 而挂起之后又必须保证**重启不重复副作用**（否则会重复派发、重复扣费、重复写库）。
+
+### 先验证，再设计
+
+方案落地前先写了一个 go/no-go spike（`spikes/spike_checkpoint_resume.py`），
+6 项验证全部通过：检查点落盘 / `interrupt()` 真挂起且**进程正常退出** /
+**另一进程**重开 sqlite 用 `Command(resume=...)` 续跑到 END / 重复投递只派发一次。
+
+它换回来两条**反直觉的 LangGraph 语义**，这两条直接决定了整个架构：
+
+1. `interrupt()` **之前**的代码在恢复时**会重跑**
+2. LangGraph **不提交“未完成节点”的状态增量** → 恢复时 `state` 里没有上次的痕迹
+
+→ 所以：**禁止用 `state` 记“我已经做过 X”**，副作用必须落在 **state 之外**的幂等台账上。
+
+### 模块
+
+| 文件 | 职责 |
+|---|---|
+| `contracts.py` | 任务契约：`TaskRequest`（幂等键 / `deadline_ts` / `attempt`）、`TaskResult`（`PENDING/RUNNING/DONE/FAILED/TIMEOUT` + `error_kind`）|
+| `checkpointer.py` | sqlite（开发）/ Redis（生产）/ memory 工厂，按配置切换 |
+| `ledger.py` | **双表幂等台账**：`attempts` 每次调用都记、`dispatched` 主键去重 → 能区分「执行了几次」与「实际生效几次」|
+| `taskbus.py` | `TaskBus` 协议 + Kafka 实现（旁路 `topic.task.pending` / `topic.task.result`）+ 内存/文件实现（离线测试与跨进程复现）|
+| `nodes.py` | `DispatchTask` / `AwaitTask` 两节点拆分 |
+| `recoverer.py` | 兜底驱动：结果已到 → 恢复；`deadline_ts` 超时 → 写 TIMEOUT 再恢复 |
+
+### 为什么把「派发」与「挂起」拆成两个节点
+
+单节点（派发 + `interrupt()` 写在同一个节点里）在 spike 中被实证**会重跑派发** ——
+因为未完成节点的状态不被提交。拆成两个节点后，`DispatchTask` 正常返回、
+状态增量被提交，恢复时只剩 `AwaitTask` 重跑。
+
+外部台账仍然保留，作为**第二道防线** —— 应对 checkpoint 回滚、整图重跑这类场景。
+
+### 幂等怎么验证
+
+不看“跑通了”，看「执行次数 vs 生效次数」：
+
+| 事件 | attempts | dispatched | 总线任务 |
+|---|---|---|---|
+| 首次挂起 | 1 | 1 | 1 |
+| 重复投递 3 次 | 4 | **1** | **1** |
+| 跨进程恢复后 | 5 | **1** | **1** |
+
+「执行了 5 次、实际只派发 1 次」才是幂等生效的证据 —— 只记一个数看不出这个区别。
+
+### 超时与兜底
+
+`interrupt()` 本身**不带超时**，所以不能指望“挂着的会自己醒”。`recoverer.py` 负责扫悬挂会话：
+
+- **结果已到** → 用 `Command(resume=result)` 恢复（正常路径的守护）
+- **`deadline_ts` 已过** → 先写一条 `TIMEOUT` 结果，再恢复
+
+→ 把“无限等待”变成“**有界等待 + 有据降级**”。
+
+---
+
+## 因果评测基准（`benchmark_causal/`）
+
+> 不评 ROUGE / BLEU，评「**有没有做对因果推断**」。基于 Pearl 因果之梯的三层结构。
+
+### 三层结构：同一 SCM，三个设问
+
+| 层 | 名称 | 设问方式 |
+|---|---|---|
+| **L1** | 观测 (Seeing) | 给定完整事实 → 问结论 |
+| **L2** | 干预 (Doing) | 对变量施加 $do(\cdot)$ → 问结论 |
+| **L3** | 反事实 (Counterfactual) | 翻转已发生变量 → 问结论 |
+| **L3′** | 抗扰动 | 与 L3 等价，但题干塞入**无关细节**（"穿了红卫衣"）|
+
+三层标准答案**全部由同一个确定性 SCM 推导**，因此天然自洽 —— 不会出现
+"L1 的答案与 L3 的答案互相矛盾"把模型冤判成错的情况。
+
+### 关键设计：`do(·)` 是真的图手术
+
+不是"改改题干"。`do(X=x)` 把 X 固定，**其结构方程被跳过**，下游按剩余方程重算。
+
+以班组加班费为例：混杂因子「项目赶工强度 Z」同时影响「加班时长 X」与「夜班津贴 M2」。
+L3 设问是 *"若非赶工，但加班时长仍为 60 小时，总额多少？"* → `do(Z=normal, X=60)`：
+
+```
+观测:    Z=crunch → X=60, 加班费=3600, 津贴=300, 总额=3900
+L2 干预: do(Z=normal)                  → X=10, 加班费=600,  津贴=0,  总额=600
+L3 反事实: do(Z=normal, X=60)          → X=60, 加班费=3600（不变！）, 津贴=0, 总额=3600
+                                                   ↑
+                            天真答法会答 600（"不赶工→加班少→加班费少"）→ 被判错
+```
+
+### 评分原则：能用 Python 判的，绝不交给 LLM
+
+| 判定项 | 谁判 | 性质 |
+|---|---|---|
+| 响应格式 / 结论非空 | Python | ✅ 确定性 |
+| 引用法条**是否存在** | 法条库查询 | ✅ 确定性 |
+| 引用法条**在案件发生日是否有效** | 时效区间判定（**法不溯及既往**） | ✅ 确定性 |
+| 金额是否精确匹配（容差 1e-2） | Python | ✅ 确定性 |
+| 因果链命中率 | 裁判（可注入 LLM；默认确定性词法匹配兜底） | ⚠️ 语义 |
+| 混杂因子是否隔离 | 裁判 | ⚠️ 语义 |
+
+**硬门禁不过 → 直接 0 分，连裁判都不用请。** 总分由 Python 按权重合成。
+
+### 多维度度量
+
+* **因果一致性率**：同一 Case 的 L1/L2/L3 必须**全对**才计 1 ——
+  "L1 对、L3 错"说明是瞎猫碰上死耗子，该 Case 整体记 0
+* **反事实抗扰动率**：L3′ 与 L3 标准答案相同，看模型答案是否被无关信息带偏
+* **分层通过率**：L1/L2/L3 各自通过率，用于诊断能力衰减
+
+### 演示输出（`python benchmark_causal/run_demo.py`）
+
+| 假装作答 | L1 | L2 | L3 | 因果一致性率 |
+|---|---|---|---|---|
+| ① 正确 | 1.0 | 1.0 | 1.0 | **1.0** |
+| ② 天真（不赶工→加班少→加班费少） | 1.0 | 1.0 | **0.0** | **0.0** |
+| ③ 编造法条（内容对但引不存在的条文） | **0.0** | 1.0 | 1.0 | **0.0** |
+| ④ 引用已废止法条（2024 年引《合同法》） | **0.0** | 1.0 | 1.0 | **0.0** |
+| ⑤ 无引证作答 | **0.0** | 1.0 | 1.0 | **0.0** |
+
+### 法条语料
+
+* 1428 条 / 9 部法律 / 892 KB，含 **valid_from / valid_to**（时效判定的前提）
+* 来源：`LawRefBook/Laws`（《著作权法》第五条规定法规正文不受著作权保护，可自由再分发）
+* 重建：`set LAWS_REPO=<已克隆的法条库>` → `python benchmark_causal/build_corpus.py`
+* 构建产物已入库（`data/legal_corpus.jsonl`），**保证 `pytest` 在干净克隆上即可运行**
+
+### 新增模块
+
+| 文件 | 职责 |
+|---|---|
+| `schemas.py` | 数据契约（题目 / 作答 / 裁判 / 得分） |
+| `legal_corpus.py` | 法条库：存在性 + 时效性（法不溯及既往）判定 |
+| `scm.py` | 确定性结构因果模型执行器（`do` 算子、反事实、混杂因子识别） |
+| `scm_labor.py` | 劳动争议两个 SCM（一个含混杂因子、一个不含） |
+| `scenarios.py` | 内置测试场景（案情/干预/反事实全部显式声明，可人工复核） |
+| `generator.py` | 由 SCM 派生 L1/L2/L3/抗扰动四道题 |
+| `gates.py` | 硬门禁 + 打分 + Case 级因果一致性聚合 |
+
+---
+
+## 更新日志 (2026-09-16：持久化执行内核 + 工程基建)
+
+| 项 | 内容 |
+|---|---|
+| P0 契约冻结 | 新增 `docs/CONTRACTS.md`（**10 条**接口契约），规矩：改契约必须同步改文档+实现+测试 |
+| P0 离线沙盘 | `tests/harness.py`：可编程假 LLM / 内存 Kafka / 脚本化编码器 / 禁越接缝客户端；`tests/test_e2e_graph.py` 锁定 happy path 节点序 |
+| P0 一键回归 | `tools/ci.py`：入口点体检 → compileall → pytest → 6 个离线 demo 真跑 → 持久化 spike（5 步 / 33 秒）|
+| P0 入口点体检 | `tools/audit_entrypoints.py`：47 个入口逐个在**清空凭据**的子进程里 import，断言「导入无副作用」|
+| P0 spike | `spikes/spike_checkpoint_resume.py` 6/6 通过，产出两条 LangGraph 恢复硬契约 |
+| P1 持久化执行 | 新增 `agent_runtime/`：任务契约 / 检查点工厂 / 双表幂等台账 / 任务总线 / Dispatch-Await 节点 / 兜底 recoverer |
+| P1 接缝收敛 | `node_replanner` 虫洞分支不再直连客户端，改走 `agentic_ops` 注入接缝（并加 `_ForbiddenLLMClient` 防绕过）|
+
+> P0 spike 的结论值得单独记一笔：**“未完成节点的状态增量不会被提交”**。
+> 第一版 spike 靠 `state["started_tasks"]` 记“已派发”，恢复后 `dispatch_count = 0`
+> 导致重复派发 —— 这就是为什么幂等必须落在外部队账，而不能靠 state。
 
 ## 更新日志 (2026-09-14：缺陷修复与工程化)
 

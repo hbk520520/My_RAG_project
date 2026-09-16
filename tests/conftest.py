@@ -50,3 +50,27 @@ def fake_container():
             self.force_used = force
 
     return _FakeContainer()
+
+
+# ===========================================================================
+# P0 · 离线端到端沙盘夹具（见 tests/harness.py 的说明）
+# ===========================================================================
+@pytest.fixture
+def programmable_llm():
+    """可编程假 LLM —— 替代真实 API，并记录每次调用"""
+    from tests.harness import ProgrammableLLM
+    return ProgrammableLLM()
+
+
+@pytest.fixture
+def mock_kafka():
+    """内存任务总线 —— 替代真实 Kafka"""
+    from tests.harness import MockKafka
+    return MockKafka()
+
+
+@pytest.fixture
+def offline_engine():
+    """已注入 StubEncoder 的图引擎（纯本地，不下载 BGE-M3）"""
+    from tests.harness import make_offline_graph_engine
+    return make_offline_graph_engine()

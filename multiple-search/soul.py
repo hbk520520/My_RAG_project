@@ -266,11 +266,17 @@ class AgenticNodesOperator(LegalLLMBase):
                     })
                 else:
                     result.append({"task_desc": str(t), "engine": "GRAPH_TRAVERSAL", "rationale": ""})
-            return result if result else [
-                {"task_desc": "全局检索案情相关法条", "engine": "GLOBAL_DENSE_WORMHOLE",
-                 "rationale": "兜底虫洞穿越"}
-            ]
-        except Exception:
+            if result:
+                return result
+            # 解析成功但一个任务都没有 —— 必须喊一声，否则"虫洞重规划"会静默变成
+            # 一条通用兜底任务，看起来像正常重规划，实际是 LLM 没按格式输出。
+            logger.warning(
+                f"虫洞重规划返回空任务列表，改用兜底任务。原始输出: {raw[:200]}")
+            return [{"task_desc": "全局检索案情相关法条", "engine": "GLOBAL_DENSE_WORMHOLE",
+                     "rationale": "兜底虫洞穿越"}]
+        except Exception as e:
+            logger.error(f"虫洞重规划输出无法解析（{type(e).__name__}: {e}），"
+                         f"改用兜底任务。原始输出: {raw[:200]}")
             return [{"task_desc": f"全局检索: {query[:50]}", "engine": "GLOBAL_DENSE_WORMHOLE",
                      "rationale": "JSON解析降级"}]
 
@@ -397,27 +403,13 @@ class Reasoner:
 # ============================================================================
 # 第四部分：真实 Planner
 # ============================================================================
-# 阶段 2：原先这里是写死的假 Key（"sk-your-real-api-key"）加模块级客户端，
-# 结果是 import soul 就会持有一个无效凭据，且真实 Key 无法通过配置注入。
-# 改为惰性工厂，统一从 config.yaml 读取。
-_llm_client = None
-
-
-def get_llm_client() -> OpenAI:
-    """惰性创建 LLM 客户端（首次调用时才校验凭据）"""
-    global _llm_client
-    if _llm_client is None:
-        api_key = cfg.get("llm", "api_key")
-        if not api_key:
-            raise RuntimeError(
-                "未配置 LLM API Key，无法调用 LLM。"
-                "请设置环境变量 DEEPSEEK_API_KEY（参考 .env.example）。"
-            )
-        _llm_client = OpenAI(
-            api_key=api_key,
-            base_url=cfg.get("llm", "base_url", default="https://api.deepseek.com"),
-        )
-    return _llm_client
+# P1：已删除 get_llm_client() 与模块级 `_llm_client`。
+#
+# 它原本是 `node_replanner` 虫洞分支的唯一调用方。P1 把那个分支改走
+# `agentic_ops.replan_with_wormhole()` 之后，它成了**无调用方的第二份客户端工厂** ——
+# 而 `AgenticNodesOperator` 经 `LegalLLMBase.__init__` 已经持有自己的客户端。
+# 两份工厂并存 = 又一处"真源分叉"（阶段 3 删 call_deepseek_planner 是同一类问题）。
+# 需要独立客户端时请直接构造 `AgenticNodesOperator()` 并覆写 `_call_messages`。
 
 
 # 阶段 7：已删除 call_deepseek_planner()。
@@ -570,7 +562,8 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     }
 
 
-def node_replanner(state: AgentState) -> dict:
+def node_replanner(state: AgentState,
+                   agentic_ops: "AgenticNodesOperator") -> dict:
     """v2: 支持 Pydantic 强类型任务格式 (task_desc + engine + rationale)"""
     obs_text = "\n".join(state.get("past_observations", []))
     queue = state["task_queue"]
@@ -601,35 +594,20 @@ def node_replanner(state: AgentState) -> dict:
         )
         replan_target = failed_desc if failed_desc else state["user_query"]
 
-        # 阶段 3：Prompt 来自 prompts.REPLANNER_SYSTEM，与 Replanner Worker 共用同一份
-        replan_messages = prompts.build_replanner_messages(
-            original_query=replan_target,
+        # P1：改走注入的 agentic_ops.replan_with_wormhole()。
+        #
+        # 原先这里**直连 get_llm_client()**，后果有两条：
+        #   1. 绕过了 `_call_messages` 这**唯一**的 LLM 接缝 —— 离线测试无法注入假 LLM，
+        #      只能靠 monkeypatch 打补丁（tests/test_e2e_graph.py 曾这么干）；
+        #   2. 它自成第二份「构造 prompt + 解析 JSON + 兜底」的实现，
+        #      与 Replanner Worker 各写一遍 —— 阶段 3 刚把 prompt 统一到 prompts.py，
+        #      解析逻辑这边又分叉了。
+        new_tasks = agentic_ops.replan_with_wormhole(
+            query=replan_target,
             global_facts=state.get("global_facts", []),
-            retry_context={"fail_count": fail_count, "fail_log": obs_text[-300:]},
-            schema_json='{"task_queue": [{"task_desc": "...", "engine": '
-                        '"GRAPH_TRAVERSAL", "rationale": "..."}]}',
+            fail_log=obs_text[-300:],
+            fail_count=fail_count,
         )
-        try:
-            # 使用惰性客户端（兼容 soul.py 独立运行时无 agentic_ops 的场景）
-            resp = get_llm_client().chat.completions.create(
-                model=cfg.get("llm", "judge_model", default="deepseek-chat"),
-                messages=replan_messages,
-                response_format={"type": "json_object"},
-                temperature=0.4, max_tokens=2048
-            )
-            data = json.loads(resp.choices[0].message.content)
-            new_tasks = []
-            for t in data.get("task_queue", []):
-                new_tasks.append({
-                    "task_desc": t.get("task_desc", str(t)),
-                    "engine": t.get("engine", "GRAPH_TRAVERSAL"),
-                    "rationale": t.get("rationale", "")
-                })
-            if not new_tasks:
-                new_tasks = [{"task_desc": f"全局检索: {replan_target[:40]}", "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "兜底"}]
-        except Exception as e:
-            logger.error(f"Replanner LLM 调用异常: {e}")
-            new_tasks = [{"task_desc": replan_target[:60], "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": f"异常降级: {str(e)[:50]}"}]
 
         # 新任务替换队列头，保留队列尾部（其他未执行的子任务）
         new_queue = new_tasks + queue[1:]
@@ -770,14 +748,19 @@ def node_cleanup_sandbox(state: AgentState) -> dict:
 # ============================================================================
 # 第六部分：组装 LangGraph 图（含沙箱节点）
 # ============================================================================
-def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperator):
+def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperator,
+                            checkpointer=None):
+    """
+    :param checkpointer: LangGraph checkpointer（P1 起用于"挂起等远端结果 + 跨进程恢复"）。
+                         传 None 即纯内存运行，行为与之前完全一致。
+    """
     builder = StateGraph(AgentState)
 
     # 闭包注入依赖
     def l0_gateway(state): return node_l0_gateway(state)
     def planner(state): return node_planner(state, agentic_ops)
     def executor(state): return node_executor(state, reasoner)
-    def replanner(state): return node_replanner(state)
+    def replanner(state): return node_replanner(state, agentic_ops)
     def generate(state): return node_generate(state, agentic_ops)
     def write_code(state): return node_write_code(state, agentic_ops)
     def execute_code(state): return node_execute_code(state)
@@ -842,7 +825,7 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
     builder.add_edge("InjectResult", "Cleanup")
     builder.add_edge("Cleanup", END)
 
-    return builder.compile()
+    return builder.compile(checkpointer=checkpointer)
 
 
 # ============================================================================

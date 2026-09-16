@@ -6,9 +6,11 @@
 
 技术栈: PyMuPDF (fitz) / re
 """
+import os
 import re
-import fitz
 from typing import List, Optional
+
+import fitz
 
 def extract_text_from_pdf(pdf_path: str) -> str:
     """
@@ -99,17 +101,42 @@ def chunk_text(
 # ============================================================================
 # 使用示例
 # ============================================================================
-if __name__ == "__main__":
-    pdf_file = "example.pdf"  # 替换为你的 PDF 路径
+def _main(argv: Optional[List[str]] = None) -> int:
+    """
+    CLI：`python dataset/chunk.py <文件.pdf> [--mode paragraph] [--min-chars 100]`
+
+    P0 修复：原先这里写死 `pdf_file = "example.pdf"  # 替换为你的 PDF 路径` ——
+    仓库里没有这个文件，任何人跑它都会得到一句
+    `FileNotFoundError: example.pdf`，看不出该怎么用。
+    现在改为显式参数 + 缺参数时给出用法（不抛堆栈）。
+    """
+    import argparse
+
+    ap = argparse.ArgumentParser(description="PDF → 语义完整的文本块")
+    ap.add_argument("pdf", help="要处理的 PDF 路径")
+    ap.add_argument("--mode", default="paragraph", choices=["paragraph", "sentence"])
+    ap.add_argument("--min-chars", type=int, default=100,
+                    help="短块向上合并的阈值（默认 100）")
+    ap.add_argument("--preview", type=int, default=5, help="预览前几块")
+    args = ap.parse_args(argv)
+
+    if not os.path.isfile(args.pdf):
+        print(f"❌ 找不到文件：{args.pdf}", flush=True)
+        return 2
 
     # 1. 提取纯文本
-    raw_text = extract_text_from_pdf(pdf_file)
+    raw_text = extract_text_from_pdf(args.pdf)
     print(f"提取文本总长度：{len(raw_text)} 字符")
 
-    # 2. 按段落分块（自动合并小于100字的段落，不设最大长度限制）
-    chunks = chunk_text(raw_text, mode="paragraph", min_chunk_chars=100)
+    # 2. 分块（短段落自动向上合并）
+    chunks = chunk_text(raw_text, mode=args.mode, min_chunk_chars=args.min_chars)
 
     print(f"\n共生成 {len(chunks)} 个块：")
-    for i, ch in enumerate(chunks[:5]):  # 只打印前5块预览
-        print(f"\n--- Chunk {i+1} (len={len(ch)}) ---")
+    for i, ch in enumerate(chunks[:args.preview]):
+        print(f"\n--- Chunk {i + 1} (len={len(ch)}) ---")
         print(ch[:200] + "..." if len(ch) > 200 else ch)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
