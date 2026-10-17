@@ -93,6 +93,9 @@
 
 ## 快速开始
 
+因果证据提取验证、文本支持度校准与因果—时间超图见
+[`docs/CAUSAL_EVIDENCE.md`](docs/CAUSAL_EVIDENCE.md)。分数表示文本支持度，不是真实因果效应；当前没有实测优于论文的结论。
+
 ```bash
 pip install -r requirements.txt          # 运行时依赖
 pip install -r requirements-dev.txt      # 追加测试依赖（pytest）

@@ -49,6 +49,9 @@ langgraph>=0.2
 # ---- 语料处理 ----
 PyMuPDF>=1.23
 
+# ---- 因果证据的 512-token / 64-overlap 分块（cl100k_base）----
+tiktoken==0.14.0
+
 # ---- 语义缓存（可选：未安装时 engine.py 自动退回 InMemoryVectorStore）----
 # 需要 redis-stack-server 才支持向量检索
 redisvl>=0.3
