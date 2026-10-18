@@ -30,9 +30,10 @@ def sources():
     }], encoder=ScriptedEncoder(topics={"budget": ["预算", "资金"]}))
 
 
-def test_committed_configuration_enables_chain_without_enabling_pageindex_memory():
+def test_committed_configuration_enables_chain_and_local_document_memory():
     assert cfg.get("causal_evidence", "enabled") is True
-    assert cfg.get("long_term_memory", "enabled") is False
+    assert cfg.get("long_term_memory", "enabled") is True
+    assert cfg.get("pageindex", "navigation") == "auto"
     assert cfg.get("causal_evidence", "prediction_cutoff") is None
     assert cfg.get("causal_evidence", "calibration_path") is None
 

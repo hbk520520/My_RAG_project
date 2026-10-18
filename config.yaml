@@ -48,7 +48,7 @@ graph:
 
 # --- 项目级长期记忆：原文、摘要、来源与向量跨重启保留 ---
 long_term_memory:
-  enabled: false
+  enabled: true
   path: ".memory/rag.sqlite"
   project_id: "legal-rag"
   embedding_space_id: "bge-m3-base-v1"  # 更换编码器/LoRA 时必须使用新的空间标识和记忆库
@@ -56,7 +56,7 @@ long_term_memory:
 # --- PageIndex 思路的本地文档检索与引用；复用现有存储和模型接缝 ---
 pageindex:
   enabled: true
-  navigation: "vector"       # 保留向量基线；"agent" 为有预算的目录/按页读取
+  navigation: "auto"         # 短文直接读；长文有预算导航；无文档时保持向量检索。vector/agent 可显式选择
   max_turns: 4
   max_pages: 8
   max_read_tokens: 6000

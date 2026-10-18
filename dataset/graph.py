@@ -993,12 +993,12 @@ def make_offline_engine():
     构造一个已注入 `StubEncoder` 的图引擎（配置全部来自 config.yaml 的 graph.* 段）。
 
     等价于：
-        engine = LegalDenseGraphBuilder.from_config()
+        engine = LegalDenseGraphBuilder.from_config(load_memory=False)
         engine.set_encoder(StubEncoder(engine.dim))
 
     供 demo / 测试使用，确保永远不会触发 BGE-M3 下载。
     """
-    engine = LegalDenseGraphBuilder.from_config()
+    engine = LegalDenseGraphBuilder.from_config(load_memory=False)
     engine.set_encoder(StubEncoder(engine.dim))
     return engine
 

@@ -1,0 +1,95 @@
+PageIndex phase C final validation, 2026-10-18
+Windows Python 3.13.9; same installed dependencies as prior phases; no dependency changes.
+TEMP/TMP=outputs/temp, OMP_NUM_THREADS=1, HF_HUB_OFFLINE=1, TRANSFORMERS_OFFLINE=1
+PYTHONIOENCODING=utf-8
+PYTEST_ADDOPTS=-o addopts=--strict-markers -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-pageindex-final-ci
+Actual final invocation: python -c <capture wrapper below>
+The wrapper calls the existing tools.ci.main without changing checks, retaining successful pytest output:
+from pathlib import Path
+import tools.ci as ci
+original = ci._run
+def capture(*args, **kwargs):
+    result = original(*args, **kwargs)
+    if args[1] == 'pytest':
+        Path('outputs/pageindex_final_pytest.log').write_text(result[2], encoding='utf-8')
+    return result
+ci._run = capture
+raise SystemExit(ci.main())
+
+Earlier failures retained as outcomes, not reported as passes:
+- Initial focused run: 2 failed, 69 passed. New test expected a grandchild in a one-level structure response;
+  corrected it to check the root and child_count. Legacy-cache test now explicitly disables local memory.
+- Added full LangGraph case: 1 failed, 489 passed because the fixture omitted pageindex.enabled;
+  corrected to enabled=true, consistent with actual application config. Rerun: 490 passed.
+- Review found an unpersisted document bridge index not refreshed, and staged child text filter using old text;
+  fixed both. Bridge/structure focused command passed 44 tests before final CI.
+  python -m pytest -q -o addopts=--strict-markers -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-pageindex-bridge-final tests/test_pageindex_structure.py tests/test_memory_graph_bridge.py
+
+No real PDF/model quality benchmark was run, as requested by the user.
+No Docker CLI/build, deployed Redis/Kafka, GPU or Python 3.10 verification.
+No independent lint/type-check configuration or verify_stage2..6 scripts exist here.
+Final CI output:
+========================================================================
+  一键回归 —— 导入安全 + compileall + pytest + 离线 demo + P0 spike
+  解释器: D:\project(now)\.venv\Scripts\python.exe
+  工作目录: D:\project(now)
+========================================================================
+
+[1/5] 入口点导入安全性
+------------------------------------------------------------------------
+✅ audit: entrypoint imports  (10.0s)
+
+[2/5] 语法编译检查
+------------------------------------------------------------------------
+✅ compileall  (1.5s)
+
+[3/5] 测试套件
+------------------------------------------------------------------------
+✅ pytest  (16.7s)
+
+[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）
+------------------------------------------------------------------------
+✅ demo: 图引擎（BGE-M3 + FAISS + igraph）  [dataset/graph.py]  (0.4s)
+✅ demo: 记忆↔图 桥接（双写/脏同步/tombstone）  [dataset/memory_graph_bridge.py]  (2.2s)
+✅ demo: 增量记忆（GMM 动态阈值）  [dataset/IncrementalMemoryManager.py]  (2.0s)
+✅ demo: Agent 状态机（LangGraph 全图）  [multiple-search/soul.py]  (2.2s)
+✅ demo: 因果评测沙盘（合法语料 + SCM）  [benchmark_causal/run_demo.py]  (0.3s)
+✅ demo: 沙箱工具返回契约（成功/失败/清理）  [multiple-search/legal_sandbox/example_usage.py]  (0.4s)
+
+[5/5] P0 spike：LangGraph 检查点 / 跨进程恢复
+------------------------------------------------------------------------
+✅ spike: checkpoint & resume  (8.3s)
+
+汇总
+------------------------------------------------------------------------
+  ✅ 通过   entrypoint imports
+  ✅ 通过   compileall
+  ✅ 通过   pytest
+  ✅ 通过   offline demos
+  ✅ 通过   P0 spike
+
+结论：✅ 全绿
+
+Final pytest output:
+........................................................................ [ 14%]
+........................................................................ [ 29%]
+........................................................................ [ 43%]
+........................................................................ [ 58%]
+........................................................................ [ 73%]
+........................................................................ [ 87%]
+...........................................................              [100%]
+============================== warnings summary ===============================
+tests/test_long_term_memory.py::test_pdf_import_preserves_original_page_text_and_inspect_cli
+  C:\Users\Administrator\miniconda3\Lib\argparse.py:1986: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x00000261D238F1F0>
+    arg_string_pattern_parts.append(pattern)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/test_pageindex_navigation.py::test_budget_rejection_never_silently_truncates_original_pages[settings0]
+  C:\Users\Administrator\miniconda3\Lib\site-packages\pydantic\_internal\_schema_generation_shared.py:31: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x00000261C89DF6A0>
+    def __init__(self, generate_json_schema: GenerateJsonSchema, handler_override: HandlerOverride | None) -> None:
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+491 passed, 2 warnings in 13.31s

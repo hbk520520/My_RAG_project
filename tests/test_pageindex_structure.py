@@ -79,13 +79,16 @@ def test_overlapping_sections_all_marked_dirty_and_deleted_evidence_not_reused()
     assert all(child["summary"] == "" for child in root["nodes"])
 
 
-def test_bridge_uses_same_section_inputs_and_acknowledges_after_commit(tmp_path):
+@pytest.mark.parametrize("durable", [True, False])
+def test_bridge_uses_same_section_inputs_and_acknowledges_after_commit(tmp_path, durable):
     from dataset.IncrementalMemoryManager import IncrementalMemoryManager, MockGraphDB
     from dataset.memory_graph_bridge import MemoryGraphBridge
-    graph = engine(tmp_path / "memory.sqlite")
+    graph = engine(tmp_path / "memory.sqlite" if durable else None)
     import_tree(graph, ["child original", "own original", ""], hierarchy(), document_id="doc", source_file="doc.pdf")
     manager = IncrementalMemoryManager(MockGraphDB(), {})
     bridge = MemoryGraphBridge(manager, graph)
+    if not durable:
+        bridge.bootstrap_from_graph()
     graph._propagate_dirty(DocumentReader.from_engine(graph).read_pages("doc", [1])[0]["id"])
     calls = []
     bridge.sync_dirty_summaries(lambda texts: calls.append(texts) or "updated")
@@ -94,6 +97,9 @@ def test_bridge_uses_same_section_inputs_and_acknowledges_after_commit(tmp_path)
     assert not manager.db.get_dirty_nodes()
     root = DocumentReader.from_engine(graph).read_structure("doc")["structure"][0]
     assert root["summary"] == "updated"
+    vertex = next(v for v in graph.graph.vs if v["metadata"].get("pageindex_node_id") == "root")
+    scores, ids = graph.index.search(vertex["dense"].reshape(1, -1), 1)
+    assert ids[0][0] == int(vertex["name"]) and scores[0][0] == pytest.approx(1.0)
 
 
 def test_postorder_closes_ancestors_and_rejects_cycles():

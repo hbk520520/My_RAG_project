@@ -397,7 +397,7 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 
 ## 契约 12 · 跨任务的项目知识记忆
 
-说明见 [LONG_TERM_MEMORY.md](LONG_TERM_MEMORY.md)。长期记忆仍默认关闭，其开关与 CHAIN 分开。
+说明见 [LONG_TERM_MEMORY.md](LONG_TERM_MEMORY.md)。本地长期记忆默认开启，其开关与 CHAIN 分开。
 
 - `LegalDenseGraphBuilder.from_config()` 在启用后恢复同一项目的原文、摘要、元数据、向量、图边和脏标记。
   `enable_memory(path, project_id, embedding_space_id)` 也可显式绑定；不得覆盖已加载的非空图。
@@ -431,6 +431,23 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 
 说明见 [PAGEINDEX_IMPLEMENTATION.md](PAGEINDEX_IMPLEMENTATION.md)，测试为 `tests/test_pageindex.py`。
 
+## 契约 14 · 文档导航预算与摘要依赖
+
+- 原页、导航摘要、CHAIN 因果关系各自保留职责；目录距离不作为因果距离，摘要不作为事实来源。
+- 书签须符合物理页码、顺序和层级；结构来源和有歧义的舍弃记录必须保留。
+  导入/重算按真实依赖先子后父，保留父正文、空白物理页与 `key_items`；失败不能发布部分摘要。
+- 同步 Reasoner 与异步 Retriever 共用 `document_navigation.retrieve`。
+  `auto` 对预算内的完整小文档直接读原页；无版本化文档时继续原向量检索。
+  混合资料/长文档由模型选择目录、原页或显式向量动作；`vector` 可选择原向量基线。
+- 页读取必须绑定目录提供的文档 ID 与版本；只读工具不接受文件路径或任意执行命令。
+  轮数、原文记录数/页数、原文文本 token 和单次目录 token 有上限；整批超限明确返回状态，不截断原页。
+  目录可分页/逐层读取；重复原文不重复计费于读取预算。达到轮数上限只能返回已读原文并标明状态。
+- 模型/工具/版本错误向调用方传播。Worker 隔离失败消息，不能发布成功检索结果。
+  `retrieval_trace` 记录动作、已读量和调用数；token 口径是配置 tokenizer 的文本计数，不是供应商账单。
+- 搜索成本诊断不自动合并/展开，不改变原页可达性。默认本地 SQLite 不等于多机器共享存储。
+
+测试为 `tests/test_pageindex_structure.py`、`tests/test_pageindex_navigation.py`，纳入现有 CI。
+
 ---
 
 ## 变更流程
@@ -438,5 +455,5 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 1. 改本文件（明确写清新旧契约与**迁移方式**）
 2. 改实现
 3. 改测试（测试是契约的可执行形式）
-4. 跑全量：`compileall` + `pytest` + `verify_stage2..6` + 全部离线 demo + **本文件对应的 e2e 沙盘**
+4. 跑现有 `python tools/ci.py`：导入检查、`compileall`、`pytest`、全部离线 demo 与跨进程检查点；包含本文件对应的集成用例
 5. 全绿才算完成

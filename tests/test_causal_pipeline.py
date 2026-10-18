@@ -279,6 +279,7 @@ def test_causal_mode_bypasses_unversioned_cache_and_forwards_request_context(cau
 def test_disabled_wrapper_keeps_existing_cache_contract(monkeypatch):
     from soul import UnifiedQueryRouter_Soul
     monkeypatch.setitem(cfg._data, "causal_evidence", {"enabled": False})
+    monkeypatch.setitem(cfg._data, "long_term_memory", {"enabled": False})
     cache = SimpleNamespace(lookup=lambda vector: "cached")
     router = SimpleNamespace(embedder=SimpleNamespace(encode=lambda *args, **kwargs: [1.0]),
                              process=lambda query: pytest.fail("Cache hit should bypass the router"))

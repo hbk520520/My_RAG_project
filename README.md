@@ -5,7 +5,9 @@
 📄 **完整项目介绍（技术选型 / 分层架构 / 整体规划 / 训练与评测 / 工程化现状）：见 [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md)**
 
 跨任务、跨重启的知识/摘要/证据记忆，以及 PageIndex 导出树的本地接入，见
-[`docs/LONG_TERM_MEMORY.md`](docs/LONG_TERM_MEMORY.md)。默认关闭，无新增第三方依赖。
+[`docs/LONG_TERM_MEMORY.md`](docs/LONG_TERM_MEMORY.md)。本地记忆已默认开启，无新增第三方依赖。
+PDF 结构构建、层次摘要、有预算的按需读取与原文引用校验，见
+[`docs/PAGEINDEX_IMPLEMENTATION.md`](docs/PAGEINDEX_IMPLEMENTATION.md)。
 整理简历或准备面试前读取 [`docs/RESUME_REMINDERS.md`](docs/RESUME_REMINDERS.md)；其中的提醒不自动写入简历正文。
 
 ## 项目结构

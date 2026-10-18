@@ -198,7 +198,7 @@ class MemoryGraphBridge:
             child_texts = [
                 staged_texts.get(c, self.mm.get_node_text(c))
                 for c in children
-                if self.mm.get_node_text(c) and self.mm.db.nodes[c].get("status") != "tombstone"
+                if staged_texts.get(c, self.mm.get_node_text(c)) and self.mm.db.nodes[c].get("status") != "tombstone"
             ]
             vertices = self.graph.graph.vs.select(name_eq=vname(node_id))
             section = vertices[0] if len(vertices) and vertices[0]["metadata"].get("pageindex_node_id") is not None else None
@@ -257,6 +257,9 @@ class MemoryGraphBridge:
                 updates.append((node_id, new_summary, enc["dense"]))
 
         self.graph.persist_memory(rebuild_vectors=True)
+        if persistent and self.graph._memory_store is None:
+            from dataset.long_term_memory import rebuild_index
+            rebuild_index(self.graph)
         return updates
 
     # ------------------------------------------------------------------

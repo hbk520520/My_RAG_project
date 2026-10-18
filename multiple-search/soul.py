@@ -317,6 +317,7 @@ class Reasoner:
         self.legal_graph = legal_graph
         self.embedding_fn = embedding_fn
         self.agentic_ops = agentic_ops
+        self.retrieval_trace = None
 
     def retrieve(self, query: str) -> str:
         """从法律图谱检索相关文档，返回合并后的文本"""
@@ -328,13 +329,23 @@ class Reasoner:
         return [evidence_from_hit(hit) for hit in self._retrieve_hits(query)]
 
     def _retrieve_hits(self, query: str):
+        from dataset.document_navigation import retrieve
+        self.retrieval_trace = None
+        if not self.legal_graph:
+            return []
+        self.legal_graph.refresh_memory()
+        result = retrieve(self.legal_graph, query, lambda: self._vector_hits(query),
+                          lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0))
+        self.retrieval_trace = result.trace
+        return result.hits
+
+    def _vector_hits(self, query: str):
         if not self.legal_graph:
             return []
         graph_encoding = (self.legal_graph._memory_store is not None
                           or cfg.get("causal_evidence", "enabled", default=False))
         if not graph_encoding and not self.embedding_fn:
             return []
-        self.legal_graph.refresh_memory()
         k = min(5, self.legal_graph.index.ntotal)
         if k == 0:
             return []
@@ -366,6 +377,7 @@ class Reasoner:
                 prediction_cutoff=prediction_cutoff, targets=causal_targets,
             )
             result = self._answer_from_docs(sub_task, original_query, analysis["context"])
+            analysis["retrieval_trace"] = self.retrieval_trace
             result["causal_evidence"] = analysis
             return result
         return self._answer_from_docs(sub_task, original_query, self.retrieve(sub_task))
@@ -906,7 +918,7 @@ if __name__ == "__main__":
 
     # 1. 模拟图谱（实际应用请加载真实数据）
     # 使用 from_config() 保证维度与 config.yaml 的 embedding.dimension 一致
-    graph_engine = LegalDenseGraphBuilder.from_config()
+    graph_engine = LegalDenseGraphBuilder.from_config(load_memory=False)
     from dataset.graph import StubEncoder
     graph_engine.set_encoder(StubEncoder(graph_engine.dim))
     dummy_nodes = [

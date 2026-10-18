@@ -12,6 +12,12 @@ from tests.test_causal_evidence import ByteEncoding, TEXT, ScriptedCalls
 from tests.test_long_term_memory import engine, tree
 
 
+@pytest.fixture(autouse=True)
+def offline_navigation_tokens(monkeypatch):
+    import tiktoken
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: ByteEncoding())
+
+
 def imported(path=None, project="test"):
     graph = engine(path, project)
     import_tree(graph, [TEXT, "original second page"], tree(), document_id="news-v1", source_file="news.pdf")

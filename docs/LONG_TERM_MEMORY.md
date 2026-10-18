@@ -1,7 +1,7 @@
 # 项目知识长期记忆与 PageIndex 参考接入
 
 当前能力：同一项目的原文知识、生成摘要、来源元数据和图向量可跨任务、跨进程重启恢复。
-默认关闭；开启后同步 Reasoner 与 Kafka Retriever 共用这份知识。运行状态检查点仍由 `agent_runtime` 管理。
+本地记忆默认开启；同步 Reasoner 与 Kafka Retriever 使用同一配置的知识库。运行状态检查点仍由 `agent_runtime` 管理。
 没有检索准确率提升或生产吞吐的实测结论。
 
 ## 工程依据与方案选择
@@ -14,7 +14,7 @@
 本次核对的参考仓库为 [VectifyAI/PageIndex](https://github.com/VectifyAI/PageIndex)，
 其 [pyproject.toml](https://github.com/VectifyAI/PageIndex/blob/main/pyproject.toml)
 标记 SDK 0.2.10 为 Alpha（查阅日期：2026-10-18）。按本项目“稳定库、最小修改”的约束，
-没有安装 SDK、复制上游源码或依赖其云服务；只实现独立的导出格式适配器。
+没有安装 SDK、复制上游源码或依赖其云服务；独立实现适配器和适用的结构导航能力。
 
 | 选择 | 兼容性、成本和风险 | 决定 |
 |---|---|---|
@@ -22,8 +22,9 @@
 | 把索引和检索替换成 PageIndex SDK 的推理式导航 | 需引入 Alpha SDK、额外依赖和模型调用，改变现有检索行为，需要新的质量/成本基线 | 本次不采用 |
 | 局部重构成逐节点持久存储、独立向量服务 | 可减少整图写放大并支撑多机器，但涉及数据模型、事务边界和运维改造 | 有实测规模瓶颈后再决定 |
 
-借鉴的是**目录层级、摘要导航、页码溯源和索引复用**；检索仍由本项目的向量召回驱动，
-不是 PageIndex 的无向量推理检索复现。参考仓库的
+借鉴的是**目录层级、摘要导航、页码溯源和索引复用**。当前导航和引用契约统一维护于
+[PAGEINDEX_IMPLEMENTATION.md](PAGEINDEX_IMPLEMENTATION.md)，保留本项目向量检索入口。
+参考仓库的
 [搜索成本树优化器](https://github.com/VectifyAI/PageIndex/blob/main/pageindex/tree_optimize.py)
 没有移植；已有独立法条可直接入库，不强加目录或额外冗余。
 
@@ -47,7 +48,7 @@ SQLite 按 `project_id` 隔离；写入使用版本比较，旧写者抛 `Memory
 
 ## 启用与使用
 
-在 `config.yaml` 开启：
+`config.yaml` 当前默认配置：
 
 ```yaml
 long_term_memory:

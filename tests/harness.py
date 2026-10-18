@@ -278,7 +278,7 @@ def make_offline_graph_engine(nodes: Optional[List[Dict[str, Any]]] = None,
     """
     from dataset.graph import LegalDenseGraphBuilder
 
-    engine = LegalDenseGraphBuilder.from_config()
+    engine = LegalDenseGraphBuilder.from_config(load_memory=False)
     engine.set_encoder(encoder if encoder is not None
                        else ScriptedEncoder(engine.dim))
 

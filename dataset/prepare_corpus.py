@@ -119,7 +119,7 @@ def _default_encode_text() -> Callable[[str], Any]:
     """
     from dataset.graph import LegalDenseGraphBuilder
 
-    engine = LegalDenseGraphBuilder.from_config()
+    engine = LegalDenseGraphBuilder.from_config(load_memory=False)
     return engine.encode_text
 
 

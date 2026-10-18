@@ -131,14 +131,24 @@ def retrieve_docs(engine: LegalDenseGraphBuilder, query: str,
 
 
 def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
-                  engine_kind: str, top_k: int) -> list:
+                  engine_kind: str, top_k: int, *, retrieval_trace: dict | None = None) -> list:
+    from dataset.document_navigation import retrieve
+    from causal_evidence.pipeline import causal_completion
+    engine.refresh_memory()
+    result = retrieve(engine, query, lambda: _retrieve_vector_hits(engine, query, engine_kind, top_k), causal_completion)
+    if retrieval_trace is not None:
+        retrieval_trace.update(result.trace)
+    return result.hits
+
+
+def _retrieve_vector_hits(engine: LegalDenseGraphBuilder, query: str,
+                          engine_kind: str, top_k: int) -> list:
     """
     按引擎类型检索，返回命中的文档文本列表。
 
     GRAPH_TRAVERSAL       : 向量召回 top_k，再沿语义边各扩展一跳
     GLOBAL_DENSE_WORMHOLE : 只做全局稠密召回（语义边不参与，用于跨领域找依据）
     """
-    engine.refresh_memory()
     if engine.index.ntotal == 0:
         logger.warning(
             "图引擎索引为空（FAISS 0 条），检索结果必然为空。"
@@ -151,6 +161,8 @@ def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
         query_vector = engine.encode_text(query)["dense"]
         hits = _vector_recall(engine, query, top_k, query_vector=query_vector)
     except Exception as e:
+        if engine._memory_store is not None or cfg.get("causal_evidence", "enabled", default=False):
+            raise
         logger.error(f"查询编码/召回失败，本次返回空结果: {e}")
         return []
 
@@ -230,7 +242,8 @@ def main():
                     engine_kind = "GLOBAL_DENSE_WORMHOLE"
 
             logger.info(f"Retriever [{engine_kind}]: {actual_query[:60]}")
-            hits = retrieve_hits(engine, actual_query, engine_kind, top_k)
+            retrieval_trace = {}
+            hits = retrieve_hits(engine, actual_query, engine_kind, top_k, retrieval_trace=retrieval_trace)
             docs = [h["content"] for h in hits if h.get("content")]
 
             # 关键：只追加 observation，**不动 task_queue**。
@@ -241,6 +254,7 @@ def main():
                 "engine": engine_kind,
                 "docs": docs,
                 "retriever_status": "ok" if docs else "empty",
+                "retrieval_trace": retrieval_trace,
             }
             if cfg.get("causal_evidence", "enabled", default=False):
                 from causal_evidence.pipeline import evidence_from_hit

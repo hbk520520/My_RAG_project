@@ -1,7 +1,8 @@
 # PageIndex 八项能力：本项目适用性复核
 
 复核日期：2026-10-18；依据上游 main 分支实际函数，而非固定行号（用户给出的部分行号已移动）。
-本轮已实施 CHAIN 主流程融合；下列 PageIndex 扩展仍是分析与计划，没有将八项全部宣称为已实现。
+本文保留融合前的分析基线与取舍。后续实际完成项和当前行为见
+[PAGEINDEX_IMPLEMENTATION.md](PAGEINDEX_IMPLEMENTATION.md)；未将八项全部宣称为已实现。
 
 ## 结论与当前基线
 

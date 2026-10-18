@@ -8,6 +8,9 @@
 
 ## 0. 关键事实速览
 
+PageIndex 思路的本地结构构建、层次摘要、预算导航、引用校验与当前验证状态，统一见
+[PAGEINDEX_IMPLEMENTATION.md](PAGEINDEX_IMPLEMENTATION.md)；下表保留项目早期架构概览。
+
 | 维度 | 内容 |
 |---|---|
 | 领域 | 中国劳动法 / 劳动争议（案例库 + 法条） |
