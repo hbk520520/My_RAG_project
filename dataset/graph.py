@@ -625,7 +625,7 @@ class LegalDenseGraphBuilder:
         self.index.add_with_ids(dense_vec.reshape(1, -1), np.array([node_id], dtype=np.int64))
 
         # 增量挂载与脏传播（Summary 节点本身不需要父节点）
-        if node_type != "Summary":
+        if node_type != "Summary" and not metadata.get("document_id"):
             self.mount_to_parent(node_id)
 
         self._propagate_dirty(node_id)
@@ -669,6 +669,7 @@ class LegalDenseGraphBuilder:
         summary_vertices = [
             v for v in self.graph.vs
             if v["type"] == "Summary" and v["metadata"].get("status") != "tombstone"
+            and not v["metadata"].get("pageindex_node_id")
         ]
         if not summary_vertices:
             return
@@ -697,6 +698,13 @@ class LegalDenseGraphBuilder:
     # ------------------------------------------------------------------
     def _propagate_dirty(self, start_node_id: int):
         """从给定节点开始，沿 parent_id 链向上把摘要节点标记为 dirty"""
+        # A PDF page may belong to several overlapping sections, not only its owner.
+        for section in self.graph.vs:
+            if (section["metadata"].get("pageindex_node_id") is not None
+                    and start_node_id in section["metadata"].get("source_node_ids", [])
+                    and section["metadata"].get("status") != "tombstone"):
+                section["metadata"]["dirty"] = True
+                self.dirty_summary_ids.add(as_num_id(section["name"]))
         current_id = start_node_id
         visited = set()
         while current_id is not None:
@@ -861,7 +869,7 @@ class LegalDenseGraphBuilder:
     # 夜间局部重算
     # ------------------------------------------------------------------
     def nightly_recalc_summaries(self, llm_generate_fn: Callable[[List[str]], str]):
-        if self._memory_store is not None:
+        if self._memory_store is not None or any(v["metadata"].get("pageindex_node_id") is not None for v in self.graph.vs):
             with self.memory_transaction():
                 self._rewrite_summaries(llm_generate_fn)
             return
@@ -874,7 +882,8 @@ class LegalDenseGraphBuilder:
             return
 
         logger.info(f"开始夜间局部重算，共 {len(self.dirty_summary_ids)} 个脏摘要节点")
-        recalc_list = list(self.dirty_summary_ids)
+        from dataset.summary_tree import postorder, summary_dependencies, section_inputs, render_section
+        recalc_list = postorder(summary_dependencies(self.graph), self.dirty_summary_ids)
         self.dirty_summary_ids.clear()
 
         for summary_id in recalc_list:
@@ -891,25 +900,39 @@ class LegalDenseGraphBuilder:
                 if (child["metadata"].get("parent_id") == summary_id
                         and child["metadata"].get("status") != "tombstone"):
                     child_texts.append(child["content"])
+            is_section = v["metadata"].get("pageindex_node_id") is not None
+            if is_section:
+                child_texts = section_inputs(self.graph, summary_id)
             if not child_texts:
+                if is_section:
+                    # All source pages were deleted: invalidate stale navigation wording.
+                    v["metadata"]["summary"] = ""
+                    v["content"] = render_section(v["metadata"]["title"], "", v["metadata"].get("key_items", []))
+                    enc = self.encode_text(v["content"])
+                    v["dense"], v["sparse"] = enc["dense"], enc["sparse"]
+                    v["metadata"]["dirty"] = False
                 logger.warning(f"摘要节点 {summary_id} 无有效子节点，跳过重算")
                 continue
 
             # 超过上限时做最大截断（同 generate_summary_node 的口径）
-            if len(child_texts) > self.max_cluster_size:
+            if not is_section and len(child_texts) > self.max_cluster_size:
                 logger.warning(f"摘要 {summary_id} 子节点 {len(child_texts)} 条超过上限，"
                                f"本次只重算前 {self.max_cluster_size} 条")
                 child_texts = child_texts[:self.max_cluster_size]
 
             new_summary = llm_generate_fn(child_texts)
             if not new_summary or not str(new_summary).strip():
-                if self._memory_store is not None:
+                if self._memory_store is not None or is_section:
                     raise ValueError("Summary generator returned empty text")
                 logger.warning(f"摘要节点 {summary_id} 重算返回空，保留原内容")
                 continue
 
-            enc = self.encode_text(str(new_summary).strip())
-            v["content"] = str(new_summary).strip()
+            text = str(new_summary).strip()
+            if is_section:
+                v["metadata"]["summary"] = text
+                text = render_section(v["metadata"]["title"], text, v["metadata"].get("key_items", []))
+            enc = self.encode_text(text)
+            v["content"] = text
             v["dense"] = enc["dense"]
             v["sparse"] = enc["sparse"]
             v["metadata"]["dirty"] = False
@@ -919,6 +942,9 @@ class LegalDenseGraphBuilder:
             # 让新的摘要向量立即参与导航召回。
 
         self.persist_memory(rebuild_vectors=True)
+        if self._memory_store is None and any(v["metadata"].get("pageindex_node_id") is not None for v in self.graph.vs):
+            from dataset.long_term_memory import rebuild_index
+            rebuild_index(self)
 
 
 # ------------------------------------------------------------------

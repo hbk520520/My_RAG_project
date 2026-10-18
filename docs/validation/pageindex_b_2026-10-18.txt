@@ -1,0 +1,49 @@
+PageIndex phase B validation, Windows Python 3.13.9
+Environment: TEMP/TMP=outputs/temp, OMP_NUM_THREADS=1; CI HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE=1
+Command: python tools/ci.py
+PYTEST_ADDOPTS=-o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-pageindex-b-ci
+========================================================================
+  一键回归 —— 导入安全 + compileall + pytest + 离线 demo + P0 spike
+  解释器: D:\project(now)\.venv\Scripts\python.exe
+  工作目录: D:\project(now)
+========================================================================
+
+[1/5] 入口点导入安全性
+------------------------------------------------------------------------
+✅ audit: entrypoint imports  (10.3s)
+
+[2/5] 语法编译检查
+------------------------------------------------------------------------
+✅ compileall  (1.5s)
+
+[3/5] 测试套件
+------------------------------------------------------------------------
+✅ pytest  (17.1s)
+
+[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）
+------------------------------------------------------------------------
+✅ demo: 图引擎（BGE-M3 + FAISS + igraph）  [dataset/graph.py]  (0.4s)
+✅ demo: 记忆↔图 桥接（双写/脏同步/tombstone）  [dataset/memory_graph_bridge.py]  (2.3s)
+✅ demo: 增量记忆（GMM 动态阈值）  [dataset/IncrementalMemoryManager.py]  (2.0s)
+✅ demo: Agent 状态机（LangGraph 全图）  [multiple-search/soul.py]  (2.3s)
+✅ demo: 因果评测沙盘（合法语料 + SCM）  [benchmark_causal/run_demo.py]  (0.3s)
+✅ demo: 沙箱工具返回契约（成功/失败/清理）  [multiple-search/legal_sandbox/example_usage.py]  (0.4s)
+
+[5/5] P0 spike：LangGraph 检查点 / 跨进程恢复
+------------------------------------------------------------------------
+✅ spike: checkpoint & resume  (8.1s)
+
+汇总
+------------------------------------------------------------------------
+  ✅ 通过   entrypoint imports
+  ✅ 通过   compileall
+  ✅ 通过   pytest
+  ✅ 通过   offline demos
+  ✅ 通过   P0 spike
+
+结论：✅ 全绿
+
+Final boundary checks after CI: python -m pytest -q -o addopts=--strict-markers -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-pageindex-b-final tests/test_pageindex_structure.py tests/test_long_term_memory.py tests/test_memory_graph_bridge.py tests/test_memory_thresholds.py
+........................................................................ [ 72%]
+...........................                                              [100%]
+99 passed in 5.49s

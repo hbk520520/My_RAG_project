@@ -181,7 +181,7 @@ def source_evidence_hits(engine, hits: list[dict], limit: int, query_vector=None
                     children = [int(v["name"]) for v in engine.graph.vs
                                 if v["metadata"].get("parent_id") == node_id]
                 pending.extend(children)
-            elif node_id not in seen:
+            elif node_id not in seen and vertex["content"].strip():
                 seen.add(node_id)
                 score = (float(np.dot(np.asarray(vertex["dense"]), np.asarray(query_vector).reshape(-1)))
                          if query_vector is not None else hit.get("score", 0.0))

@@ -162,7 +162,8 @@ class MemoryGraphBridge:
 
         :param summary_fn: 输入子节点文本列表，返回新摘要文本的函数（通常为 LLM 调用）
         """
-        if self.graph._memory_store is None:
+        if self.graph._memory_store is None and not any(v["metadata"].get("pageindex_node_id") is not None
+                                                       for v in self.graph.graph.vs):
             self._sync_dirty_summaries(summary_fn)
             return
         with self.graph.memory_transaction():
@@ -175,9 +176,16 @@ class MemoryGraphBridge:
             self.mm.set_node_text(node_id, text)
 
     def _sync_dirty_summaries(self, summary_fn):
-        persistent = self.graph._memory_store is not None
+        from dataset.summary_tree import postorder, section_inputs, render_section
+        persistent = self.graph._memory_store is not None or any(v["metadata"].get("pageindex_node_id") is not None
+                                                                 for v in self.graph.graph.vs)
         updates = []
-        dirty_nodes = self.mm.db.get_dirty_nodes()
+        dependencies = {node: [child for child in self.mm.db.get_children(node)
+                              if self.mm.db.nodes[child].get("type") == "summary"]
+                        for node, props in self.mm.db.nodes.items() if props.get("type") == "summary"
+                        and props.get("status") != "tombstone"}
+        dirty_nodes = postorder(dependencies, set(self.mm.db.get_dirty_nodes()) | self.graph.dirty_summary_ids)
+        staged_texts = {}
         if not dirty_nodes:
             logger.info("无脏节点需要同步")
             return updates
@@ -188,17 +196,27 @@ class MemoryGraphBridge:
             # 从 MockGraphDB 获取子节点文本
             children = self.mm.db.get_children(node_id)
             child_texts = [
-                self.mm.get_node_text(c)
+                staged_texts.get(c, self.mm.get_node_text(c))
                 for c in children
                 if self.mm.get_node_text(c) and self.mm.db.nodes[c].get("status") != "tombstone"
             ]
+            vertices = self.graph.graph.vs.select(name_eq=vname(node_id))
+            section = vertices[0] if len(vertices) and vertices[0]["metadata"].get("pageindex_node_id") is not None else None
+            if section is not None:
+                child_texts = section_inputs(self.graph.graph, node_id)
             if not child_texts:
-                continue
+                if section is None:
+                    continue
 
             # 生成新摘要
-            new_summary = summary_fn(child_texts)
-            if persistent and (not new_summary or not str(new_summary).strip()):
+            new_summary = summary_fn(child_texts) if child_texts else ""
+            if persistent and child_texts and (not new_summary or not str(new_summary).strip()):
                 raise ValueError("Summary generator returned empty text")
+            if section is not None:
+                section["metadata"]["summary"] = new_summary
+                new_summary = render_section(section["metadata"]["title"], new_summary,
+                                             section["metadata"].get("key_items", []))
+            staged_texts[node_id] = new_summary
 
             # 更新 MockGraphDB
             if not persistent:
@@ -232,7 +250,9 @@ class MemoryGraphBridge:
 
             if persistent:
                 v = self.graph.graph.vs.find(name=vname(node_id))
-                v["metadata"].update(retrieval_role="navigation", derived=True, source_node_ids=children)
+                v["metadata"].update(retrieval_role="navigation", derived=True)
+                if section is None:
+                    v["metadata"]["source_node_ids"] = children
                 self.graph.dirty_summary_ids.discard(node_id)
                 updates.append((node_id, new_summary, enc["dense"]))
 

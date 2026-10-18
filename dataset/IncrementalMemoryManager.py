@@ -284,11 +284,11 @@ class IncrementalMemoryManager:
             logger.info("无脏节点，跳过清算")
             return
 
-        # 按树层级从底层向高层排序（简单起见，此处假设 level 属性存在）
-        nodes_with_level = [(nid, self.db.nodes[nid].get("level", 1)) for nid in dirty_nodes]
-        nodes_with_level.sort(key=lambda x: x[1])  # 低层级优先
-
-        for node_id, level in nodes_with_level:
+        from dataset.summary_tree import postorder
+        dependencies = {nid: [child for child in self.db.get_children(nid)
+                              if self.db.nodes[child].get("type") == "summary"]
+                        for nid, props in self.db.nodes.items() if props.get("type") == "summary"}
+        for node_id in postorder(dependencies, dirty_nodes):
             children = self.db.get_children(node_id)
             child_texts = [self.get_node_text(c) for c in children if c in self.text_storage]
             if not child_texts:
@@ -301,6 +301,7 @@ class IncrementalMemoryManager:
 
             # 更新节点内容
             self.db.nodes[node_id]["content"] = new_summary
+            self.set_node_text(node_id, new_summary)
             # 刷新 embedding (此处假设有函数可用，演示跳过)
             # self.db.nodes[node_id]["embedding"] = embed_fn(new_summary)
             # 更新 summary_embeddings (若该节点在索引中)
@@ -308,7 +309,7 @@ class IncrementalMemoryManager:
                 self.summary_embeddings[node_id] = self.db.nodes[node_id]["embedding"]
 
             self.db.clean_node(node_id)
-            logger.info(f"节点 {node_id} (level {level}) 已重写摘要")
+            logger.info(f"节点 {node_id} 已重写摘要")
 
     # ---------- 辅助：重建摘要向量索引 ----------
     def rebuild_summary_index(self):
