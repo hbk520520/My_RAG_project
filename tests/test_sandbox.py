@@ -444,4 +444,4 @@ def test_sandbox_exec_does_not_reimplement_docker_lifecycle():
     # 只应通过 sandbox_manager 间接操作容器
     assert "docker.from_env" not in src
     assert "containers.run" not in src
-    assert "from sandbox_manager import" in src
+    assert "from .manager import" in src
