@@ -38,7 +38,8 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 
 ## 两条执行链的启用方式
 
-`config.yaml` 中设置 `causal_evidence.enabled: true`。提取和验证都复用已有
+`config.yaml` 现已默认 `causal_evidence.enabled: true`，也可显式设 false 恢复旧流程。
+简单问答、复杂 LangGraph 任务和 Kafka Worker 均参与。提取和验证都复用已有
 `llm.judge_model`（不强制切换为论文的 GPT-4o-mini）；校准标识是 `<judge_model>:causal-v1`。
 每个块一次提取，有通过原文检查的候选才额外一次独立验证请求。验证器仍可能和提取器犯相同错误。
 检查新配置不会自动发起 LLM 请求；执行启用后的任务才会使用现有 API 配置。
@@ -49,6 +50,16 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 router.process("预算削减是否导致资金紧张？",
                prediction_cutoff="2025-10-01", causal_targets=["资金紧张"])
 ```
+
+简单问答经真实检索 → CHAIN → Grader 后返回 `response`、`sufficient` 和 `causal_evidence`；
+复杂任务继续返回 `agent_report` 与 `agent_causal_evidence`。闲聊不进入证据管线。
+普通问答缺少截止日时仍构建并验证因果图，但 `weighting_status=not_scored_without_cutoff`。
+不使用当前日期替代预测截止日，也不自动猜测目标同义词。
+
+启用 CHAIN 时，两条检索链使用图引擎编码器；命中摘要先展开回原文，即使长期记忆未启用也如此。
+证据记录和分块保留 `document_id`、`source_file`、`page_start`、`page_end`，传入 Grader/Reasoner/Generator。
+无原文关联的摘要不进入提取器。保留这些位置不等于已实现答案引用的程序校验，后者仍是待补能力。
+启用时，同步模型传输和 Grader 的失败上报给调用方，不用异常文本或未经评分的旧提取结果冒充成功。
 
 调用方仍需为检索图注入语料。节点 metadata 可提供 `record_id`、`source_id`、`timestamp`、
 `available_at`、`availability_verified`、`similarity`；FAISS 内积和图游走衰减分不冒充存储的语义相似度。
@@ -104,7 +115,7 @@ router.process("预算削减是否导致资金紧张？",
 相较论文，本项目**在实现上更进一步**：把原文可追溯验证、非因果拒绝、独立标注校准、
 来源隔离评估作为显式组件。是否在实验效果上优于论文，仍需上述对照与消融，当前不能下结论。
 
-## 最终工程验证（2026-10-18）
+## 首次实现验证（2026-10-18，历史记录）
 
 - 全量 `pytest`：388 项通过（原有 325 项 + 新增 63 项）；既有 SQLite 测试有未关闭连接的 ResourceWarning。
 - `python tools/ci.py`：五类检查全部通过，包含新模块入口导入、compileall、pytest、6 个离线 demo、跨进程恢复实验。
@@ -128,3 +139,39 @@ $env:PYTEST_ADDOPTS = '-o cache_dir=outputs/pytest-cache --basetemp=outputs/pyte
 仅在 `.venv` 补齐 FastAPI/uvicorn 并重装同版本 torch 2.10.0 后，入口检查通过；没有为此修改业务代码。
 一条集成测试还发现“证据全部被过滤、配置目标实体不存在”的异常，现已改为明确报告无可用证据。
 原始最终 CI 输出见 [validation/causal_evidence_ci_2026-10-18.txt](validation/causal_evidence_ci_2026-10-18.txt)。
+
+## 主流程默认融合验收（2026-10-18）
+
+在已有 CHAIN 模块基础上，默认启用并补齐简单问答入口、原文展开、同编码器查询、来源位置传递，
+以及同步模型/Grader 的失败上报；空索引在编码前退出，避免无语料时加载模型。
+没有新增依赖、数据库迁移或调用真实外部模型。
+PageIndex 本轮产物为 [八项能力复核与分阶段方案](PAGEINDEX_INTEGRATION_REVIEW.md)，不把计划功能记作已完成。
+
+- 修改前全量基线：419 项通过。
+- 第一轮专项：48 项通过、1 项失败；原有 partial 重试用例的模型桩没有 CHAIN JSON 响应，已补齐，
+  未在业务代码加入“解析失败当无因果关系”的兜底。
+- 入口与来源链补齐后全量：430 项通过。
+- 补充传输/Grader 失败路径和空索引检查后：最终完整 CI 覆盖 **433 项**，五类检查全部通过；
+  测试数量用 collect-only 独立确认。新增 14 项集成测试见 `tests/test_chain_integration.py`。
+- 既有 SQLite 检查点测试的未关闭连接 ResourceWarning 仍在，未纳入本次无关修复。
+- `git diff --check` 通过；无仓库既定 lint/类型检查流程。真实 LLM 质量、线上 Kafka/Redis、Docker 镜像和
+  Python 3.10 仍未验证。工程接线通过不代表提取质量、校准收益或预测效果超过论文。
+
+实际执行的全量测试和 CI 入口（本机 Python 3.13.9；依赖版本沿用前次验证环境）：
+
+```powershell
+$env:TEMP = Join-Path (Get-Location) 'outputs/temp'
+$env:TMP = $env:TEMP
+$env:OMP_NUM_THREADS = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:HF_HUB_OFFLINE = '1'
+$env:TRANSFORMERS_OFFLINE = '1'
+.\.venv\Scripts\python.exe -m pytest -q -o addopts=--strict-markers -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-chain-default-full
+$env:PYTEST_ADDOPTS = '-o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-ci-chain-active-final2'
+.\.venv\Scripts\python.exe tools/ci.py
+git diff --check
+```
+
+最终运行用日志包装器调用相同 `tools/ci.py::main`，额外保存成功的 pytest 原始输出，没有跳过或修改检查规则。
+前一条直接全量 pytest 为 430 项；最后新增的三项由最终 CI 验证。
+原始最终输出见 [validation/chain_active_ci_2026-10-18.txt](validation/chain_active_ci_2026-10-18.txt)。

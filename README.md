@@ -98,7 +98,10 @@
 ## 快速开始
 
 因果证据提取验证、文本支持度校准与因果—时间超图见
-[`docs/CAUSAL_EVIDENCE.md`](docs/CAUSAL_EVIDENCE.md)。分数表示文本支持度，不是真实因果效应；当前没有实测优于论文的结论。
+[`docs/CAUSAL_EVIDENCE.md`](docs/CAUSAL_EVIDENCE.md)。CHAIN 已默认用于简单问答、LangGraph 和 Worker 证据流程；
+时间权重仍需显式截止日和图中目标。分数表示文本支持度，不是真实因果效应；当前没有实测优于论文的结论。
+PageIndex 八项能力的逐项适用性、现有缺口与最小融合顺序见
+[`docs/PAGEINDEX_INTEGRATION_REVIEW.md`](docs/PAGEINDEX_INTEGRATION_REVIEW.md)。
 
 ```bash
 pip install -r requirements.txt          # 运行时依赖

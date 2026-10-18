@@ -165,7 +165,8 @@ def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
             hits.extend(extra)
 
     from dataset.long_term_memory import source_evidence_hits
-    return source_evidence_hits(engine, hits, len(hits), query_vector)
+    return source_evidence_hits(engine, hits, len(hits), query_vector,
+                                original_only=cfg.get("causal_evidence", "enabled", default=False))
 
 
 # ============================================================================

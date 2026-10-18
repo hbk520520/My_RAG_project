@@ -73,9 +73,18 @@ HAPPY_PATH_ORDER = ["L0_Gateway", "Planner", "Executor", "Replanner", "Generate"
                     "WriteCode", "ExecuteCode", "InjectResult", "Cleanup"]
 
 
+@pytest.fixture(autouse=True)
+def offline_causal_tokenizer(monkeypatch):
+    from causal_evidence import graph
+    from tests.test_causal_evidence import ByteEncoding
+    original = graph.chunk_record
+    monkeypatch.setattr(graph, "chunk_record", lambda record, **kwargs: original(record, encoding=ByteEncoding()))
+
+
 def _happy_llm(grader: str = GRADER_SUFFICIENT) -> ProgrammableLLM:
     """一个默认"资料充足"的假 LLM"""
     return (ProgrammableLLM()
+            .on("Causal Extraction:", '{"propositions": [], "causal_relations": []}')
             .on("Meta-Planner", PLAN_JSON)
             .on("事实调查官", grader)
             .on("重规划引擎", WORMHOLE_JSON)
@@ -183,6 +192,7 @@ def test_full_graph_happy_path_reaches_cleanup():
     assert visited == HAPPY_PATH_ORDER
     assert visited[-1] == "Cleanup"
     assert final["final_report"]
+    assert final["causal_evidence"][0]["weighting_status"] == "not_scored_without_cutoff"
     assert "96000" in final["final_report"], "沙箱算出的金额必须注入报告"
     assert "计算明细" in final["final_report"]
 
@@ -243,6 +253,7 @@ def test_grader_is_called_once_per_executor_step():
 def test_grader_partial_inserts_supplement_task_and_retries():
     seq = iter([GRADER_PARTIAL, GRADER_SUFFICIENT])
     llm = (ProgrammableLLM()
+           .on("Causal Extraction:", '{"propositions": [], "causal_relations": []}')
            .on("Meta-Planner", PLAN_JSON)
            .on_dynamic("事实调查官", lambda messages: next(seq))
            .on("Python程序员", CODE)
@@ -333,6 +344,7 @@ def test_sandbox_failure_is_surfaced_not_swallowed():
 def test_no_sandbox_needed_skips_code_nodes():
     """报告与问题里都没有金额关键词 → 不该进沙箱"""
     llm = (ProgrammableLLM()
+           .on("Causal Extraction:", '{"propositions": [], "causal_relations": []}')
            .on("Meta-Planner", json.dumps({
                "skeleton": {"nodes": [{"id": "1", "abstract": "确认书面合同义务",
                                        "deps": []}]},

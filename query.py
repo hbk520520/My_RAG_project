@@ -203,9 +203,10 @@ class UnifiedQueryRouter_Query:
     # ==========================================================
     def process(self, query: str, *, prediction_cutoff=None, causal_targets=None) -> Dict[str, Any]:
         result = self.route(query)
+        causal_mode = cfg.get("causal_evidence", "enabled", default=False)
         # 如果需要唤醒 Agent 图引擎，在这里根据 intent 进一步处理
-        if result["intent"] == "COMPLEX_TASK":
-            logger.info("⏳ 复杂意图，启动 Plan-and-Replan 智能体引擎...")
+        if result["intent"] == "COMPLEX_TASK" or (result["intent"] == "SIMPLE_QA" and causal_mode):
+            logger.info("⏳ 执行知识检索与证据分析...")
             try:
                 # 延迟导入，避免循环依赖
                 import sys, os
@@ -231,6 +232,15 @@ class UnifiedQueryRouter_Query:
                     embedding_fn=embed_fn,
                     agentic_ops=agentic_ops
                 )
+
+                if result["intent"] == "SIMPLE_QA":
+                    answer = reasoner.answer(query, query, prediction_cutoff=prediction_cutoff,
+                                             causal_targets=causal_targets)
+                    analysis = answer["causal_evidence"]
+                    result.update(status="simple_rag", sufficient=answer["sufficient"], causal_evidence=analysis)
+                    result["response"] = (agentic_ops.reason(query, answer["fact"] + "\n" + analysis["context"])
+                                          if answer["sufficient"] else answer["fact"])
+                    return result
 
                 agent = build_plan_replan_agent(reasoner, agentic_ops)
 

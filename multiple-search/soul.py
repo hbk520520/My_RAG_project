@@ -148,6 +148,8 @@ class LegalLLMBase:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
+            if cfg.get("causal_evidence", "enabled", default=False):
+                raise
             logger.error(f"LLM 调用失败: {e}")
             return "{}" if require_json else f"系统异常: {str(e)}"
 
@@ -328,15 +330,16 @@ class Reasoner:
     def _retrieve_hits(self, query: str):
         if not self.legal_graph:
             return []
-        persistent = self.legal_graph._memory_store is not None
-        if not persistent and not self.embedding_fn:
+        graph_encoding = (self.legal_graph._memory_store is not None
+                          or cfg.get("causal_evidence", "enabled", default=False))
+        if not graph_encoding and not self.embedding_fn:
             return []
         self.legal_graph.refresh_memory()
-        emb = self.legal_graph.encode_text(query)["dense"] if persistent else self.embedding_fn(query)
-        norm_emb = self.legal_graph._l2_normalize(emb).reshape(1, -1).astype(np.float32)
         k = min(5, self.legal_graph.index.ntotal)
         if k == 0:
             return []
+        emb = self.legal_graph.encode_text(query)["dense"] if graph_encoding else self.embedding_fn(query)
+        norm_emb = self.legal_graph._l2_normalize(emb).reshape(1, -1).astype(np.float32)
         sims, ids = self.legal_graph.index.search(norm_emb, k)
         docs = []
         for sim, nid in zip(sims[0], ids[0]):
@@ -350,7 +353,8 @@ class Reasoner:
                 except ValueError:
                     pass
         from dataset.long_term_memory import source_evidence_hits
-        return source_evidence_hits(self.legal_graph, docs, 5, norm_emb)
+        return source_evidence_hits(self.legal_graph, docs, 5, norm_emb,
+                                    original_only=cfg.get("causal_evidence", "enabled", default=False))
 
     def answer(self, sub_task: str, original_query: str, *, prediction_cutoff=None,
                causal_targets=None) -> Dict[str, Any]:
@@ -413,6 +417,8 @@ class Reasoner:
                     "grader_status": status
                 }
         except Exception as e:
+            if cfg.get("causal_evidence", "enabled", default=False):
+                raise
             logger.warning(f"Grader 调用异常，回退旧逻辑: {e}")
 
         # 回退原有逻辑 (保持兼容)
@@ -890,6 +896,8 @@ if __name__ == "__main__":
     # 1. 模拟图谱（实际应用请加载真实数据）
     # 使用 from_config() 保证维度与 config.yaml 的 embedding.dimension 一致
     graph_engine = LegalDenseGraphBuilder.from_config()
+    from dataset.graph import StubEncoder
+    graph_engine.set_encoder(StubEncoder(graph_engine.dim))
     dummy_nodes = [
         {"id": 1, "content": "试用期不符合录用条件可解除合同。", "type": "Raw", "metadata": {"source": "劳动法"}},
         {"id": 2, "content": "违法解除劳动合同按经济补偿标准的二倍支付赔偿金。", "type": "Raw", "metadata": {"source": "劳动法"}},
@@ -911,6 +919,8 @@ if __name__ == "__main__":
             system_prompt = messages[0]["content"] if messages else ""
             logger.info(f"Mock LLM called with: {system_prompt[:50]}...")
             if require_json:
+                if "Causal Extraction:" in system_prompt:
+                    return '{"propositions": [], "causal_relations": []}'
                 if "事实调查官" in system_prompt:
                     return '{"rationale": "Mock充足", "status": "sufficient", "extracted_facts": ["Mock事实1"]}'
                 if "重规划引擎" in system_prompt:

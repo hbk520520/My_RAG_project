@@ -148,9 +148,10 @@ def restore_graph(engine, payload: dict):
     engine.pending_cluster_seeds, engine._fallback_id_counter = seeds, counter
 
 
-def source_evidence_hits(engine, hits: list[dict], limit: int, query_vector=None) -> list[dict]:
+def source_evidence_hits(engine, hits: list[dict], limit: int, query_vector=None, *, original_only=False) -> list[dict]:
     """PageIndex-style summaries route to evidence; their wording is never a source."""
-    if engine._memory_store is None and not any(h["metadata"].get("retrieval_role") == "navigation" for h in hits):
+    if not original_only and engine._memory_store is None and not any(
+            h["metadata"].get("retrieval_role") == "navigation" for h in hits):
         return hits[:limit]
     result, seen = [], set()
     for hit in hits:

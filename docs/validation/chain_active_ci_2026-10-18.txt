@@ -1,0 +1,61 @@
+========================================================================
+  一键回归 —— 导入安全 + compileall + pytest + 离线 demo + P0 spike
+  解释器: D:\project(now)\.venv\Scripts\python.exe
+  工作目录: D:\project(now)
+========================================================================
+
+[1/5] 入口点导入安全性
+------------------------------------------------------------------------
+✅ audit: entrypoint imports  (10.3s)
+
+[2/5] 语法编译检查
+------------------------------------------------------------------------
+✅ compileall  (1.3s)
+
+[3/5] 测试套件
+------------------------------------------------------------------------
+✅ pytest  (16.7s)
+........................................................................ [ 16%]
+........................................................................ [ 33%]
+........................................................................ [ 49%]
+........................................................................ [ 66%]
+........................................................................ [ 83%]
+........................................................................ [ 99%]
+.                                                                        [100%]
+============================== warnings summary ===============================
+tests/test_memory_graph_bridge.py::test_pending_sync_captures_graph_engine_failure
+  C:\Users\Administrator\miniconda3\Lib\logging\__init__.py:1136: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x000001A48E6172E0>
+    if self.stream and hasattr(self.stream, "flush"):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+C:\Users\Administrator\miniconda3\Lib\site-packages\_pytest\unraisableexception.py:33: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x000001A484CF0D60>
+  gc.collect()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+
+
+[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）
+------------------------------------------------------------------------
+✅ demo: 图引擎（BGE-M3 + FAISS + igraph）  [dataset/graph.py]  (0.4s)
+✅ demo: 记忆↔图 桥接（双写/脏同步/tombstone）  [dataset/memory_graph_bridge.py]  (2.5s)
+✅ demo: 增量记忆（GMM 动态阈值）  [dataset/IncrementalMemoryManager.py]  (2.0s)
+✅ demo: Agent 状态机（LangGraph 全图）  [multiple-search/soul.py]  (2.3s)
+✅ demo: 因果评测沙盘（合法语料 + SCM）  [benchmark_causal/run_demo.py]  (0.3s)
+✅ demo: 沙箱工具返回契约（成功/失败/清理）  [multiple-search/legal_sandbox/example_usage.py]  (0.5s)
+
+[5/5] P0 spike：LangGraph 检查点 / 跨进程恢复
+------------------------------------------------------------------------
+✅ spike: checkpoint & resume  (8.4s)
+
+汇总
+------------------------------------------------------------------------
+  ✅ 通过   entrypoint imports
+  ✅ 通过   compileall
+  ✅ 通过   pytest
+  ✅ 通过   offline demos
+  ✅ 通过   P0 spike
+
+结论：✅ 全绿
+
+Collection confirmed separately: 433 tests. Baseline: 419 passed. Direct full pytest before the final three failure/empty-index tests: 430 passed.

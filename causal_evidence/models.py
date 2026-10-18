@@ -11,7 +11,20 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
-class EvidenceRecord(Contract):
+class SourceLocation(Contract):
+    document_id: str | None = Field(default=None, min_length=1)
+    source_file: str | None = Field(default=None, min_length=1)
+    page_start: int | None = Field(default=None, ge=1)
+    page_end: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def page_interval(self):
+        if self.page_start is not None and self.page_end is not None and self.page_end < self.page_start:
+            raise ValueError("Source page interval is reversed")
+        return self
+
+
+class EvidenceRecord(SourceLocation):
     record_id: str = Field(min_length=1)
     source_id: str | None = Field(default=None, min_length=1)
     text: str = Field(min_length=1)
@@ -21,7 +34,7 @@ class EvidenceRecord(Contract):
     similarity: float | None = Field(default=None, ge=0, le=1)
 
 
-class TextChunk(Contract):
+class TextChunk(SourceLocation):
     chunk_id: str
     record_id: str
     source_id: str | None = None
