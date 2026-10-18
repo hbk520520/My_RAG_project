@@ -34,7 +34,8 @@ logger = logging.getLogger("UnifiedRouter")
 
 # ---- 统一智能路由网关 (query.py 专用，与 soul.py 的缓存包装器配对) ----
 class UnifiedQueryRouter_Query:
-    def __init__(self):
+    def __init__(self, *, agent_service=None):
+        self._agent_service = agent_service
         # ---- 阶段 2：全部改为读 config.yaml，不再写死 ----
         model_path = cfg.get("embedding", "model_path", default="./RAG_data/bge-legal-v1")
         device = cfg.get("embedding", "device", default="cpu")
@@ -208,11 +209,31 @@ class UnifiedQueryRouter_Query:
         if result["intent"] == "COMPLEX_TASK" or (result["intent"] == "SIMPLE_QA" and causal_mode):
             logger.info("⏳ 执行知识检索与证据分析...")
             try:
+                if result["intent"] == "COMPLEX_TASK" and cfg.get("runtime", "enabled", default=True):
+                    from agent_runtime.service import AgentService
+                    service = getattr(self, "_agent_service", None)
+                    if service is None:
+                        self._agent_service = service = AgentService()
+                    row = service.submit({"query": query,
+                        "project_id": cfg.get("long_term_memory", "project_id", default="legal-rag"),
+                        "prediction_cutoff": prediction_cutoff, "causal_targets": causal_targets})
+                    row = service.execute(row["run_id"])
+                    final = row["result"] or {}
+                    result.update(run_id=row["run_id"], run_status=row["status"],
+                                  agent_report=final.get("final_report", ""),
+                                  agent_observations=final.get("past_observations", []))
+                    for source, target in (("causal_evidence", "agent_causal_evidence"), ("citations", "citations")):
+                        if final.get(source):
+                            result[target] = final[source]
+                    result["status"] = "agent_execution" if row["status"] == "succeeded" else "agent_" + row["status"]
+                    if row["error"]:
+                        result["agent_error"] = row["error"]
+                    return result
                 # 延迟导入，避免循环依赖
                 import sys, os
                 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "multiple-search"))
-                from soul import build_plan_replan_agent, Reasoner, AgenticNodesOperator
-                from soul import LegalDenseGraphBuilder as SoulGraphBuilder
+                from legal_agent.compat import build_plan_replan_agent, Reasoner, AgenticNodesOperator
+                from legal_agent.compat import LegalDenseGraphBuilder as SoulGraphBuilder
 
                 # 构建 Agent（使用 soul.py 内的图引擎和操作器）
                 # 阶段 2：图引擎参数与 LLM 凭据全部来自 config.yaml。

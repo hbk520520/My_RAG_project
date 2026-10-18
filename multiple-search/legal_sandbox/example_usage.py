@@ -60,7 +60,7 @@ def node_write_code(state: Dict[str, Any]) -> Dict[str, Any]:
     return state
 
 
-def node_execute_code(state: Dict[str, Any]) -> Dict[str, Any]:
+def node_execute_code(state: Dict[str, Any], runner=None) -> Dict[str, Any]:
     """
     执行代码的节点。
 
@@ -71,7 +71,7 @@ def node_execute_code(state: Dict[str, Any]) -> Dict[str, Any]:
     code = state.get("generated_code", "")
     hop = state.get("current_hop", 0)
 
-    outcome = run_code_once(code, session_id=state.get("sandbox_session_id"))
+    outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
     state["sandbox_session_id"] = outcome["session_id"]
 
     if outcome["error"]:
@@ -114,7 +114,9 @@ if __name__ == "__main__":
 
     # ---- 1. 成功路径 ----
     state: Dict[str, Any] = {"current_hop": 1}
-    state = node_execute_code(node_write_code(state))
+    from agent_tools.sandbox.executor import run_in_process
+    trusted_fixture = lambda code, **kwargs: run_in_process(code)
+    state = node_execute_code(node_write_code(state), runner=trusted_fixture)
     print(f"\n[成功路径] next_action={state['next_action']}")
     print(f"           结果={state['current_context'][-1]['data']}")
     assert state["next_action"] == "evaluate"
@@ -122,7 +124,7 @@ if __name__ == "__main__":
 
     # ---- 2. 失败路径：代码报错必须被"回传"而不是被吞掉 ----
     bad: Dict[str, Any] = {"current_hop": 2, "generated_code": "raise ValueError('boom')"}
-    bad = node_execute_code(bad)
+    bad = node_execute_code(bad, runner=trusted_fixture)
     print(f"\n[失败路径] next_action={bad['next_action']}")
     print(f"           错误={bad['current_context'][-1]['data'].strip().splitlines()[-1]}")
     assert bad["next_action"] == "write_code", "报错必须打回重写（不许静默吞掉）"

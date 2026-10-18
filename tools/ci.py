@@ -40,6 +40,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 环境变量：既保证离线可复现，也保证中文输出不乱码
 ENV = {
     **os.environ,
+    "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONIOENCODING": "utf-8",
     "PYTHONUTF8": "1",
     "HF_HUB_OFFLINE": "1",          # 禁止下载模型
@@ -55,6 +56,7 @@ ENV = {
 
 # 全部离线可跑的 demo（显式白名单，新增的请先确认无网络/凭据依赖再加进来）
 OFFLINE_DEMOS = [
+    ("统一 Agent 运行时（持久化/等待输入/恢复/回滚）", "agent_runtime.demo"),
     ("图引擎（BGE-M3 + FAISS + igraph）", "dataset/graph.py"),
     ("记忆↔图 桥接（双写/脏同步/tombstone）", "dataset/memory_graph_bridge.py"),
     ("增量记忆（GMM 动态阈值）", "dataset/IncrementalMemoryManager.py"),
@@ -136,7 +138,8 @@ def main() -> int:
     _banner("[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）")
     demo_ok = True
     for label, script in OFFLINE_DEMOS:
-        ok, _, _ = _run([sys.executable, script], f"demo: {label}  [{script}]")
+        command = [sys.executable, script] if script.endswith(".py") else [sys.executable, "-m", script]
+        ok, _, _ = _run(command, f"demo: {label}  [{script}]")
         demo_ok = demo_ok and ok
     results.append((demo_ok, 0.0, "", "offline demos"))
 

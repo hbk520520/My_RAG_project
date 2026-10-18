@@ -6,7 +6,7 @@ HTTP 健康检查端点、LLM 调用的指数退避重试、以及本地 Dead Le
 
 技术栈: http.server / threading / openai (ResilientLLMClient) / collections
 """
-import time, json, logging, threading
+import time, json, logging, threading, os
 from typing import Dict, Any, Optional
 from datetime import datetime
 from collections import defaultdict
@@ -281,6 +281,8 @@ class DeadLetterQueue:
         }
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         logging.getLogger("dlq").warning(f"消息进入 DLQ: topic={topic}, key={key}")
 
     def peek(self, limit: int = 100) -> list:

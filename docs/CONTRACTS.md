@@ -1,3 +1,5 @@
+> 2026-10-18：当前持久执行权威是 agent_runtime；运行方法及限制见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。旧五阶段 topic 仅用于兼容排空。
+
 # 契约冻结（M0-T1）
 
 > **这份文件的地位**：从 P0 起，下面每一条都是**接口契约**。
@@ -243,9 +245,9 @@ AgenticNodesOperator._call_messages(messages, require_json=False, temperature=0.
 
 ### 6.3 结构化输出的容错契约
 
-- `grade_facts` 解析失败 → **退回 `{"status": "irrelevant"}`**（保守：宁可多检索，不放过）
-- `generate_plan` 解析失败 → 先试旧扁平格式，再退化为单任务兜底
-- `replan_with_wormhole` 解析失败 → 退化为一条 `GLOBAL_DENSE_WORMHOLE` 任务
+- `grade_facts` 调用或解析失败 → 显式失败；不能把模型故障改写成 irrelevant。
+- `generate_plan` 接受既有双层/扁平格式；非法或空计划显式失败，不伪造任务。
+- `replan_with_wormhole` 非法或空输出显式失败；结构化任务保留 ID 与依赖。
 - 三者都**必须记 `logger.warning/error`**，不许静默
 
 ---
@@ -261,31 +263,19 @@ run_code_once(code: str, session_id: Optional[str] = None,
 #    "via":         "docker" | "local" | None}
 ```
 
-- `via="local"` = **绕过容器隔离的降级路径**，仅供开发环境。
-- 无 Docker 时自动降级，但必须 `logger.warning` 说明隔离被绕过。
-- 生产环境必须保证 Docker 可用。
+- 在线 `run_code_once` 只调用 Docker，失败返回错误，不调用主进程 exec。
+- `run_in_process` 仅由可信离线示例/测试显式注入；不是在线工具或安全边界。
+- 每次计算为独立 Python 进程；默认新运行时使用 Decimal 算式工具，可选代码执行才需要 Docker。
 
 ---
 
-## 契约 8 · 工具层返回（P2 占位）
+## 契约 8 · 工具边界
 
-> **此处待 P2 填充。** 目标形状（MCP 兼容）：
-
-```python
-@dataclass
-class ToolResult:
-    ok: bool
-    data: Any                 # 成功负载
-    error: Optional[str]      # 失败原因（ok=False 时必填）
-    error_kind: Optional[str] # "validation" | "timeout" | "permission" | "internal"
-    trace_id: str
-```
-
-**现在就冻结的三条**（P2 不得违反）：
-
-1. `ok=False` 时 `error` **必填** —— 不许返回"空成功"。
-2. 每个工具必须声明**权限层级**（只读 / 需确认 / 禁止）。
-3. 工具**不得抛裸异常给节点**，一律转成 `ToolResult`；节点负责决定重试还是上报。
+- 检索、模型请求、Decimal 和 Docker 代码执行通过共享运行上下文记录调用身份与结果。
+- 工具输入在接口处校验；异常由运行服务分类并保存，不用错误文本冒充正常结果。
+- 既有沙箱返回字典保持兼容，包含 calc_result / error / session_id / via。
+- 只读工具可在中断后重试；外部写入工具目前未注册，中断后必须先人工核对结果。
+- 代码执行默认不开放；新运行请求显式 allow_code 才能使用 Docker 工具。
 
 ---
 
@@ -297,69 +287,27 @@ class ToolResult:
 |---|---|---|
 | ~~`soul.py::node_replanner` 虫洞分支~~ | ~~直连 `get_llm_client()`，**绕过** `agentic_ops` 注入接缝~~ | ✅ **P1 已拆**：改走 `agentic_ops.replan_with_wormhole()`，并删掉那个无调用方的第二份客户端工厂。`tests/harness.py::_ForbiddenLLMClient` 现在会**直接抛错**拦截任何绕过行为 |
 | `soul.py::node_generate` | 用关键词表判定 `needs_sandbox_calc` | 中文关键词枚举，P3 应改为 LLM 显式声明 |
-| 沙箱 | `via="local"` 绕过隔离 | 生产必须 Docker；当前环境无 Docker daemon |
-| 双链路 | LangGraph 链路 与 Worker 链路各有一份编排 | 行为已对齐（`replanner_rules.py` 共用），但仍是两份实现 |
+| 沙箱 | 可信离线测试可显式注入 local 执行器 | 在线路径只用 Docker，不能自动降级 |
+| 双链路 | 新运行时由共享 LangGraph 编排 | 历史五阶段实现只作显式兼容排空，不获得新恢复保证 |
 
 ---
 
-## 契约 10 · 任务派发与结果回传（P1）
+## 契约 10 · 统一持久任务执行
 
-**动机**：Agent 可能要把工作交给远端（工具 / 长任务 / 另一个 Worker）。主图**不能阻塞等待**，
-而且挂起之后必须保证**重启不重复副作用**。
+- CLI、HTTP、Kafka 作业入口使用相同 `AgentService` 与 LangGraph 流程。
+- 状态权威在独立运行库，检查点在配对 SQLite 库；知识快照不是任务检查点。
+- `run_id` 标识运行，epoch 标识回滚后的分支；工具调用身份由运行/epoch/节点/步骤/输入哈希构成。
+- 状态、租约、结果与检查点写入校验当前执行者。取消和回滚后的旧消息/旧执行者不能覆盖状态。
+- 只有所有任务完成且报告非空才能 succeeded；模型/计算故障、预算耗尽各有失败状态。
+- 等待用户补充通过 interrupt 挂起，resume 不重置原 deadline 或预算。
+- 新 topic 是 `topic.agent.pending` / `topic.agent.result`，消息 `{version:1,event_id,run_id,epoch}`。
+- 保存任务/待发送消息为本地原子事务；收到 broker 确认后标记发送完成。
+- 已落盘的只读工具结果在重放时复用；结果落盘前的远端计费不能保证不重复。
+- 外部写入中断必须先核对结果，不能自动重试或靠回滚检查点撤销；本期不注册外部写工具。
+- `text_tokens` 是保守文本上界而非供应商账单；具体预算与计时口径见运行文档。
 
-### 10.1 两条新 Topic（与契约 4 的 5 条并存，属**旁路**）
-
-| 常量 | topic 名 | 方向 |
-|---|---|---|
-| `TOPIC_TASK_PENDING` | `topic.task.pending` | 主图 → 执行器 |
-| `TOPIC_TASK_RESULT` | `topic.task.result` | 执行器 → 主图 |
-
-消息体（JSON）：
-
-```jsonc
-// topic.task.pending
-{"task_id": "<str>", "session_id": "<str>", "kind": "llm|tool|sandbox",
- "payload": {...}, "deadline_ts": 1234567890.0, "attempt": 1}
-
-// topic.task.result
-{"task_id": "<str>", "state": "DONE|FAILED|TIMEOUT",
- "data": {...} | null, "error": "<str>" | null,
- "error_kind": "validation|timeout|permission|internal" | null,
- "produced_at": 1234567890.0, "producer": "<worker 标识>"}
-```
-
-`task_id` 是**幂等键**，由主图生成，全局唯一；重试**不得更换** `task_id`。
-
-### 10.2 硬约束（由 P0 spike 实证，违反即重复副作用）
-
-| # | 约束 | 原因 |
-|---|---|---|
-| 1 | **禁止用 `state` 记"我已派发过"** | LangGraph 不提交未完成节点的状态增量，恢复时 state 里没有该痕迹 |
-| 2 | 派发前**必须**查外部幂等台账 | 恢复 / 重投 / 整图重跑都会再次走到派发代码 |
-| 3 | 台账要能区分 `attempts`（执行几次）与 `dispatched`（生效几次） | 只记一个数看不出"重跑多次但只派发一次" |
-| 4 | **派发与挂起拆成两个节点** | 派发节点正常完成后其状态增量会被提交，恢复时只剩 `AwaitTask` 重跑 |
-| 5 | `interrupt()` 本身**不带超时** | 必须有外部兜底（`recoverer`），否则会话会永久挂着 |
-
-### 10.3 幂等台账的形状
-
-```sql
-dispatched(task_id TEXT PRIMARY KEY, at INTEGER)   -- 主键去重：副作用只发生一次
-attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证明"确实重跑过"
-```
-
-### 10.4 超时契约
-
-- `deadline_ts` 由**派发方**在 `TaskRequest` 里给出，执行方不得自行延长。
-- 超时后**不得**丢弃会话：`recoverer` 写入一条 `state="TIMEOUT"` 的结果，再驱动恢复，
-  让主图走**有据降级**（而不是无限等待）。
-- `error_kind` 必须填 —— 下游要靠它决定重试还是直接出报告。
-
-### 10.5 恢复的两种情形（`recoverer` 职责）
-
-| 情形 | 动作 |
-|---|---|
-| 结果已到（`topic.task.result` 有对应 `task_id`） | 用 `Command(resume=result)` 恢复会话 |
-| `deadline_ts` 已过且无结果 | 先写 TIMEOUT 结果，再恢复 |
+测试：`test_runtime_store.py`、`test_agent_runtime.py`、`test_runtime_recovery.py`、`test_runtime_api_transport.py`。
+实际使用方法与当前边界只维护于 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。
 
 ---
 

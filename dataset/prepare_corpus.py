@@ -89,6 +89,8 @@ def build_nodes(files: List[str],
     for path in files:
         with open(path, "r", encoding="utf-8") as fh:
             raw = fh.read()
+        import hashlib
+        fingerprint = hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
         chunks = chunk_text(raw, mode=chunk_mode, min_chunk_chars=min_chunk_chars)
         for idx, chunk in enumerate(chunks):
@@ -100,6 +102,9 @@ def build_nodes(files: List[str],
                     "source_file": os.path.basename(path),
                     "chunk_index": idx,
                     "length": len(chunk),
+                    "record_id": f"{os.path.basename(path)}:{fingerprint}:{idx}",
+                    "source_id": fingerprint,
+                    "document_fingerprint": fingerprint,
                 },
             })
             texts.append(chunk)

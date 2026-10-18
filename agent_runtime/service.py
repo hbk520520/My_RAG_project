@@ -1,0 +1,252 @@
+"""One execution service for direct calls, HTTP and Kafka job delivery."""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+import threading
+import time
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
+from openai import APIConnectionError, APITimeoutError, RateLimitError
+from pydantic import ValidationError
+
+from config_loader import cfg
+from .context import RunContext, current_run
+from .contracts import BudgetExceeded, OutcomeUnknown, ROOT, RunRequest, RunStatus, RunStopped
+from .store import RunStore, dumps
+
+
+class AgentService:
+    def __init__(self, store=None, *, engine_factory=None, operator_factory=None, workflow_factory=None):
+        self.store = store or RunStore(cfg.get("runtime", "path", default=".runtime/runs.sqlite"))
+        self.checkpoint_path = self.store.path.with_name(self.store.path.stem + "-checkpoints.sqlite")
+        self.engine_factory = engine_factory or self._engine
+        if operator_factory is None:
+            from legal_agent.operators import AgenticNodesOperator
+            operator_factory = AgenticNodesOperator
+        self.operator_factory = operator_factory
+        self.workflow_factory = workflow_factory
+        self._encoders = {}
+        self._operator = None
+
+    def submit(self, request, *, transport="local"):
+        request = RunRequest.model_validate(request)
+        if transport not in ("local", "kafka"):
+            raise ValueError("transport must be local or kafka")
+        topic = cfg.get("runtime", "pending_topic", default="topic.agent.pending") if transport == "kafka" else None
+        return self.store.create(request, queued_topic=topic)
+
+    def _engine(self, project_id):
+        from dataset.graph import LegalDenseGraphBuilder
+        from .contracts import local_path
+        engine = LegalDenseGraphBuilder.from_config(load_memory=False)
+        if cfg.get("long_term_memory", "enabled", default=False):
+            engine.enable_memory(local_path(cfg.get("long_term_memory", "path")), project_id,
+                                 cfg.get("long_term_memory", "embedding_space_id"))
+        return engine
+
+    def _pinned_engine(self, row):
+        from dataset.long_term_memory import graph_snapshot, restore_graph
+        engine = self.engine_factory(row["project_id"])
+        pin = self.store.pin(row["run_id"], row["epoch"])
+        policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox")}
+        policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
+        config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
+        import prompts
+        prompt_hash = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
+        if pin is None:
+            pin = {"snapshot": graph_snapshot(engine), "revision": engine._memory_revision,
+                   "config_hash": config_hash, "prompt_hash": prompt_hash}
+            self.store.pin(row["run_id"], row["epoch"], pin)
+        else:
+            if pin["config_hash"] != config_hash or pin["prompt_hash"] != prompt_hash:
+                raise ValueError("Run configuration or prompts changed; submit a new run")
+            restore_graph(engine, pin["snapshot"])
+        # Frozen run view: retrieval must not refresh into a different corpus revision.
+        engine._memory_store = None
+        return engine
+
+    @contextmanager
+    def _workflow(self, row, *, inspection=False):
+        connection = sqlite3.connect(self.checkpoint_path, check_same_thread=False, timeout=10)
+        try:
+            from .checkpointer import FencedSqliteSaver
+            context = current_run.get()
+            saver = FencedSqliteSaver(connection, context) if context else SqliteSaver(connection)
+            if self.workflow_factory:
+                graph = self.workflow_factory(saver)
+            elif inspection:
+                from legal_agent.workflow import build_plan_replan_agent
+                graph = build_plan_replan_agent(None, None, checkpointer=saver)
+            else:
+                from legal_agent.reasoning import Reasoner
+                from legal_agent.workflow import build_plan_replan_agent
+                engine = self._pinned_engine(row)
+                cached = self._encoders.get(row["project_id"])
+                if cached is not None:
+                    engine.set_encoder(cached)
+                if self._operator is None:
+                    self._operator = self.operator_factory()
+                ops = self._operator
+                reasoner = Reasoner(engine, lambda text: engine.encode_text(text)["dense"], ops)
+                graph = build_plan_replan_agent(reasoner, ops, checkpointer=saver)
+            yield graph
+            if not inspection and not self.workflow_factory and engine._encoder is not None:
+                self._encoders[row["project_id"]] = engine._encoder
+        finally:
+            connection.close()
+
+    def _config(self, row, checkpoint=None):
+        config = {"configurable": {"thread_id": row["run_id"]},
+                  "recursion_limit": row["request"]["budgets"]["node_steps"] + 10}
+        checkpoint = checkpoint or row.get("checkpoint")
+        if checkpoint:
+            config["configurable"]["checkpoint_id"] = checkpoint
+        return config
+
+    def execute(self, run_id, *, epoch=None):
+        token = self.store.claim(run_id, epoch=epoch,
+                                 result_topic=cfg.get("runtime", "result_topic", default="topic.agent.result"))
+        if token is None:
+            return self.store.get(run_id)
+        row = self.store.get(run_id)
+        context = RunContext(self.store, run_id, row["epoch"], token)
+        result_topic = cfg.get("runtime", "result_topic", default="topic.agent.result") if row["transport"] == "kafka" else None
+        stop = threading.Event()
+
+        def renew():
+            while not stop.wait(5):
+                try:
+                    self.store.heartbeat(run_id, row["epoch"], token)
+                except (RunStopped, sqlite3.Error):
+                    return
+
+        heartbeat = threading.Thread(target=renew, name=f"agent-lease-{run_id[:8]}", daemon=True)
+        heartbeat.start()
+        mark = current_run.set(context)
+        final = {}
+        try:
+            with self._workflow(row) as graph:
+                config = self._config(row)
+                snapshot = graph.get_state(config)
+                if row["resume"] is not None and any(task.interrupts for task in snapshot.tasks):
+                    payload = Command(resume=row["resume"])
+                elif snapshot.values:
+                    payload = None
+                else:
+                    request = row["request"]
+                    payload = {"user_query": request["query"], "task_queue": [], "past_observations": [],
+                               "global_facts": [], "completed_tasks": [], "user_facts": [],
+                               "retry_context": {}, "recursion_depth": 0,
+                               "prediction_cutoff": request["prediction_cutoff"],
+                               "causal_targets": request["causal_targets"]}
+                    payload["calculation_mode"] = "code" if request["allow_code"] else "structured"
+                for value in graph.stream(payload, config, stream_mode="values", durability="sync"):
+                    context.check()
+                    final = value
+                    latest = graph.get_state({"configurable": {"thread_id": run_id}})
+                    self.store.set_checkpoint(run_id, row["epoch"], token,
+                                              latest.config["configurable"]["checkpoint_id"])
+                latest = graph.get_state({"configurable": {"thread_id": run_id}})
+                final = latest.values
+                waiting = any(task.interrupts for task in latest.tasks)
+                if waiting:
+                    status, error_kind = RunStatus.WAITING, None
+                elif final.get("execution_status") in ("budget_exhausted", "calculation_failed"):
+                    status, error_kind = RunStatus.FAILED, final["execution_status"]
+                elif latest.next:
+                    raise RuntimeError("Workflow stopped with unfinished nodes")
+                elif not final.get("final_report"):
+                    raise RuntimeError("Workflow completed without a report")
+                else:
+                    status, error_kind = RunStatus.SUCCEEDED, None
+                context.check()
+                self.store.finish(run_id, row["epoch"], token, status, result=final, error_kind=error_kind,
+                                  result_topic=result_topic)
+        except Exception as exc:
+            if isinstance(exc, BudgetExceeded):
+                status, kind = RunStatus.TIMED_OUT, "budget"
+            elif isinstance(exc, OutcomeUnknown):
+                status, kind = RunStatus.FAILED, "outcome_unknown"
+            elif isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError, ConnectionError)):
+                status, kind = RunStatus.FAILED, "transport"
+            elif isinstance(exc, (ValidationError, ValueError, json.JSONDecodeError)):
+                status, kind = RunStatus.FAILED, "validation"
+            elif isinstance(exc, RunStopped):
+                status, kind = RunStatus.CANCELLED, "ownership_lost"
+            else:
+                status, kind = RunStatus.FAILED, "internal"
+            self.store.finish(run_id, row["epoch"], token, status, result=final or None,
+                              error=f"{type(exc).__name__}: {exc}", error_kind=kind,
+                              result_topic=result_topic)
+        finally:
+            stop.set()
+            heartbeat.join(timeout=1)
+            current_run.reset(mark)
+            session = final.get("sandbox_session_id")
+            if session:
+                from agent_tools.sandbox.executor import destroy_session
+                destroy_session(session)
+        return self.store.get(run_id)
+
+    def resume(self, run_id, answer, *, transport="local"):
+        if not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
+            raise ValueError("Answer must contain 1–20000 characters")
+        topic = cfg.get("runtime", "pending_topic", default="topic.agent.pending") if transport == "kafka" else None
+        return self.store.requeue(run_id, answer=answer, topic=topic)
+
+    def checkpoints(self, run_id):
+        row = self.store.get(run_id)
+        with self._workflow(row, inspection=True) as graph:
+            return [{"checkpoint_id": state.config["configurable"]["checkpoint_id"],
+                     "next": list(state.next), "created_at": state.created_at}
+                    for state in graph.get_state_history({"configurable": {"thread_id": run_id}}, limit=100)]
+
+    def rewind(self, run_id, checkpoint, *, transport="local"):
+        row = self.store.get(run_id)
+        with self._workflow(row, inspection=True) as graph:
+            state = graph.get_state(self._config(row, checkpoint))
+            if not state.values:
+                raise ValueError("Checkpoint is not part of this run")
+        topic = cfg.get("runtime", "pending_topic", default="topic.agent.pending") if transport == "kafka" else None
+        return self.store.rewind(run_id, checkpoint, topic=topic)
+
+    def recover(self):
+        self.store.expire_waiting(cfg.get("runtime", "result_topic", default="topic.agent.result"))
+        return [self.execute(run_id) for run_id in self.store.recoverable()]
+
+    def backup(self, destination):
+        """Publish a manifest only after both runtime databases pass integrity checks."""
+        from .contracts import RunConflict, local_path
+        target = local_path(destination)
+        if target.exists():
+            raise ValueError("Backup directory must not already exist")
+        # Hold the authority write lock: a new executor cannot start during backup.
+        with self.store.connection() as guard:
+            guard.execute("BEGIN IMMEDIATE")
+            if guard.execute("SELECT 1 FROM runs WHERE status=? AND lease_until>?",
+                             (RunStatus.RUNNING, time.time())).fetchone():
+                raise RunConflict("Wait for the running task to finish before backup")
+            target.mkdir(parents=True)
+            self.store.backup(target / self.store.path.name)
+            files = [self.store.path.name]
+            if self.checkpoint_path.exists():
+                source = sqlite3.connect(self.checkpoint_path)
+                copied = sqlite3.connect(target / self.checkpoint_path.name)
+                try:
+                    source.backup(copied)
+                    if copied.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise RuntimeError("Checkpoint backup is corrupt")
+                finally:
+                    copied.close()
+                    source.close()
+                files.append(self.checkpoint_path.name)
+            manifest = {"format": 1, "run_db": self.store.path.name,
+                        "files": {name: hashlib.sha256((target / name).read_bytes()).hexdigest()
+                                               for name in files}}
+            (target / "manifest.json").write_text(dumps(manifest), encoding="utf-8")
+        return target

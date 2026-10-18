@@ -45,6 +45,10 @@ def node_planner(state: AgentState, agentic_ops: "AgenticNodesOperator") -> dict
     """
     logger.info("Planner 启动，生成执行计划")
     queue = agentic_ops.generate_plan(state["user_query"])
+    from agent_runtime.contracts import TaskSpec
+    queue = [TaskSpec.model_validate({"task_id": f"task-{index}", **task}).model_dump()
+             if isinstance(task, dict) else TaskSpec(task_id=f"task-{index}", task_desc=task).model_dump()
+             for index, task in enumerate(queue)]
     return {"task_queue": queue}
 
 
@@ -54,9 +58,9 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     # ---- 熔断保护 ----
     depth = state.get("recursion_depth", 0)
     max_depth = cfg.get("agent", "max_recursion_depth", default=5)
-    if depth > max_depth:
+    if depth >= max_depth:
         logger.warning(f"🚨 触发算力熔断（depth={depth} > {max_depth}），强制终止")
-        return {"retry_context": {"status": "force_stop"}}
+        return {"retry_context": {"status": "force_stop"}, "execution_status": "budget_exhausted"}
 
     current_task = state["task_queue"][0]
 
@@ -84,7 +88,15 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     if cfg.get("causal_evidence", "enabled", default=False):
         causal_args = {"prediction_cutoff": state.get("prediction_cutoff"),
                        "causal_targets": state.get("causal_targets")}
-    result = reasoner.answer(actual_query, original_query=state["user_query"], **causal_args)
+    completed = state.get("completed_tasks", [])
+    if isinstance(current_task, dict):
+        done_ids = {task.get("task_id") for task in completed}
+        if not set(current_task.get("deps", [])) <= done_ids:
+            raise ValueError("Task dependencies have not completed")
+    result = reasoner.answer(actual_query, original_query=state["user_query"],
+                             engine_kind=engine, user_facts=state.get("user_facts"), **causal_args)
+    if result.get("missing_info_kind") == "user" and not result["sufficient"]:
+        return {"pending_question": result["suggestion"], "execution_status": "waiting_input"}
 
     # 构造观察记录（包含引擎信息）
     task_label = actual_query[:60]
@@ -104,6 +116,7 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
         suggestion = result.get("suggestion", "需要更精准的法律检索")
         # v2: 补充任务使用 Dict 格式
         supplement_task = {
+            **(current_task if isinstance(current_task, dict) else {}),
             "task_desc": f"{actual_query[:40]}（补充：{suggestion}）",
             "engine": engine,  # 保持原引擎
             "rationale": f"信息不足补搜: {suggestion[:60]}"
@@ -135,6 +148,9 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
         "retry_context": retry_ctx,
         "recursion_depth": depth + 1
     }
+    if sufficient:
+        delta["completed_tasks"] = completed + [current_task if isinstance(current_task, dict)
+                                                else {"task_desc": actual_query}]
     if "causal_evidence" in result:
         delta["causal_evidence"] = [result["causal_evidence"]]
     return delta
@@ -188,21 +204,31 @@ def node_replanner(state: AgentState,
         )
 
         # 新任务替换队列头，保留队列尾部（其他未执行的子任务）
+        original = queue[0] if isinstance(queue[0], dict) else {}
+        for index, task in enumerate(new_tasks):
+            task["task_id"] = (original.get("task_id", f"task-{state.get('recursion_depth', 0)}")
+                               if index == len(new_tasks) - 1 else
+                               f"replan-{state.get('recursion_depth', 0)}-{index}")
+            task["deps"] = original.get("deps", []) if index == 0 else [new_tasks[index-1]["task_id"]]
         new_queue = new_tasks + queue[1:]
     else:
         # 情况3：硬规则补充
         # 规则表来自 replanner_rules.py，与 Replanner Worker 共用同一份。
         # 与 Worker 路径的差别：这里只做"追加"，不做 LLM 重规划。
         new_queue = list(queue)
-        hard_tasks = apply_hard_rules(obs_text, queue, logger)
+        hard_tasks = apply_hard_rules(obs_text, queue + state.get("completed_tasks", []), logger)
         if hard_tasks:
             logger.info(f"硬规则补充 {len(hard_tasks)} 条任务")
             new_queue = hard_tasks + new_queue
 
-    return {"task_queue": new_queue, "retry_context": {}}
+    return {"task_queue": new_queue, "retry_context": {} if status == "sufficient" or
+            status == "irrelevant" or (status == "partial" and fail_count > 2) else retry_ctx}
 
 
 def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
+    if state.get("calculation_mode") == "structured" and any(
+            word in state["user_query"] for word in ("赔偿", "补偿", "加班费", "工资", "双倍", "2N", "N+1", "金额", "元")):
+        return {"needs_sandbox_calc": True, "sandbox_retries": 0, "final_report": ""}
     logger.info("Generator 生成最终法律意见书")
     accumulated = []
     for idx, obs in enumerate(state.get("past_observations", [])):
@@ -223,7 +249,8 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
 
     # 检测是否需要金额计算 → 触发沙箱流程
     calc_keywords = ["赔偿", "补偿", "加班费", "工资", "双倍", "2N", "N+1", "金额", "元"]
-    needs_calc = any(kw in state["user_query"] + report for kw in calc_keywords)
+    needs_calc = (state.get("calculation_mode") != "structured" and
+                  any(kw in state["user_query"] + report for kw in calc_keywords))
 
     result = {"final_report": report}
     if citations is not None:
@@ -238,6 +265,9 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
 def node_write_code(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
     """生成 Python 计算代码"""
     logger.info("📝 沙箱阶段: 生成计算代码")
+    if state.get("calculation_mode") == "structured":
+        return {"calculation_plan": agentic_ops.generate_calculation_plan(
+            state["user_query"], state.get("past_observations", []) + state.get("user_facts", []))}
 
     # 从 past_observations 提取推理链
     reasoning_chain = []
@@ -263,7 +293,7 @@ def node_write_code(state: AgentState, agentic_ops: AgenticNodesOperator) -> dic
     }
 
 
-def node_execute_code(state: AgentState) -> dict:
+def node_execute_code(state: AgentState, runner=None) -> dict:
     """
     执行沙箱阶段生成的代码。
 
@@ -271,12 +301,17 @@ def node_execute_code(state: AgentState) -> dict:
     legal_sandbox/sandbox_exec.py，本节点只负责"按熔断策略决定要不要重试"。
     """
     logger.info("🐳 沙箱阶段: 执行计算代码")
+    if state.get("calculation_mode") == "structured":
+        from agent_tools.calculator import calculate
+        value = calculate(state["calculation_plan"])
+        return {"calc_result": f"{value['amount']}；公式：{value['formula']}；假设：{value['assumptions']}",
+                "calculation_ok": True}
 
     code = state.get("generated_code", "")
     if not code:
         return {"retry_context": {"sandbox_error": "无代码可执行"}}
 
-    outcome = run_code_once(code, session_id=state.get("sandbox_session_id"))
+    outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
 
     if outcome["error"]:
         logger.warning(f"沙箱执行报错（via={outcome['via']}）: {outcome['error']}")
@@ -296,28 +331,40 @@ def node_execute_code(state: AgentState) -> dict:
             "sandbox_session_id": outcome["session_id"],
             "retry_context": {},
             "sandbox_retries": max_retries,
+            "calculation_ok": False,
+            "execution_status": "calculation_failed",
         }
 
     logger.info(f"沙箱执行成功（via={outcome['via']}）: {str(outcome['calc_result'])[:100]}")
     return {
         "calc_result": outcome["calc_result"],
         "sandbox_session_id": outcome["session_id"],
+        "calculation_ok": True,
     }
 
 
-def node_inject_calc_result(state: AgentState) -> dict:
+def node_inject_calc_result(state: AgentState, agentic_ops=None) -> dict:
     """将沙箱计算结果注入最终报告"""
     calc_result = state.get("calc_result", "")
     final_report = state.get("final_report", "")
+    generated = {}
+    if state.get("calculation_mode") == "structured":
+        # Generate the report after arithmetic, with the checked result in context.
+        report_state = {**state, "calculation_mode": "report_only",
+                        "past_observations": state.get("past_observations", []) + ["程序核算结果：" + calc_result]}
+        generated = node_generate(report_state, agentic_ops)
+        final_report = generated["final_report"]
 
     if calc_result:
+        if state.get("calculation_ok") is False:
+            return {"final_report": f"{final_report}\n\n【计算未完成】\n{calc_result}"}
         enriched_report = (
             f"{final_report}\n\n"
             f"【计算明细】\n"
             f"经代码核算，最终结果为：{calc_result}"
         )
         logger.info("沙箱计算结果已注入最终报告")
-        return {"final_report": enriched_report}
+        return {**generated, "final_report": enriched_report}
 
     return {}
 
@@ -329,3 +376,11 @@ def node_cleanup_sandbox(state: AgentState) -> dict:
         destroy_sandbox_session(session_id)
     return {"sandbox_session_id": None}
 
+
+def node_await_input(state):
+    from langgraph.types import interrupt
+    answer = interrupt({"question": state["pending_question"]})
+    if not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
+        raise ValueError("Resume requires a nonempty answer of at most 20000 characters")
+    return {"user_facts": state.get("user_facts", []) + [answer.strip()],
+            "pending_question": None, "execution_status": "running"}

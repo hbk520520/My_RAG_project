@@ -40,3 +40,4 @@ training_data/
 .idea/
 .DS_Store
 Thumbs.db
+.runtime/

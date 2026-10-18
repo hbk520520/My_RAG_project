@@ -168,7 +168,7 @@ class LegalDenseGraphBuilder:
             from pathlib import Path
             path = Path(cfg.get("long_term_memory", "path"))
             if not path.is_absolute():
-                path = Path(_ROOT_DIR) / path
+                path = Path(cfg.config_path).resolve().parent / path
             engine.enable_memory(path, cfg.get("long_term_memory", "project_id"),
                                  cfg.get("long_term_memory", "embedding_space_id"))
         return engine

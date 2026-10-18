@@ -371,7 +371,8 @@ def test_checkpointer_can_be_attached_to_the_agent(tmp_path):
     from langgraph.checkpoint.sqlite import SqliteSaver
 
     db = tmp_path / "e2e_ckpt.sqlite"
-    saver = SqliteSaver(sqlite3.connect(str(db), check_same_thread=False))
+    connection = sqlite3.connect(str(db), check_same_thread=False)
+    saver = SqliteSaver(connection)
 
     agent, _, _ = make_agent(_happy_llm(), checkpointer=saver)
     assert agent.checkpointer is not None
@@ -381,11 +382,13 @@ def test_checkpointer_can_be_attached_to_the_agent(tmp_path):
     assert visited[-1] == "Cleanup"
     assert return_ckpt_count(db) > 0, "checkpoints 表必须是空的 → 说明根本没落盘"
     assert final["final_report"]
+    connection.close()
 
 
 def return_ckpt_count(db_path) -> int:
     import sqlite3
-    with sqlite3.connect(str(db_path)) as con:
+    from contextlib import closing
+    with closing(sqlite3.connect(str(db_path))) as con:
         try:
             return con.execute("SELECT COUNT(*) FROM checkpoints").fetchone()[0]
         except sqlite3.OperationalError:

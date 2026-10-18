@@ -44,7 +44,8 @@ fastapi>=0.110
 uvicorn>=0.27
 
 # ---- Agent 编排 ----
-langgraph>=0.2
+langgraph>=1.2.12,<2
+langgraph-checkpoint-sqlite>=3.1,<4
 
 # ---- 语料处理 ----
 PyMuPDF>=1.24.3  # 新 PDF 适配器使用稳定的 pymupdf 模块名

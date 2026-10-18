@@ -1,13 +1,7 @@
-FROM python:3.10-slim
-
-RUN pip install fastapi uvicorn pydantic pandas numpy --no-cache-dir
-
+# Build from repository root: docker build -f multiple-search/legal_sandbox/Dockerfile -t legal-sandbox:v2 .
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY sandbox_server.py .
-
-# 安全加固：创建非 root 用户
-RUN useradd -m sandboxuser
-USER sandboxuser
-
-EXPOSE 8000
-CMD ["python", "sandbox_server.py"]
+COPY agent_tools/sandbox/runner.py /app/runner.py
+USER 65534:65534
+CMD ["python", "-c", "import time; time.sleep(86400)"]

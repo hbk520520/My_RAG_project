@@ -77,4 +77,3 @@ class UnifiedQueryRouter_Soul:
     def route(self, query: str) -> Dict[str, Any]:
         """透传路由方法"""
         return self._router.route(query)
-

@@ -216,39 +216,25 @@ def test_run_code_once_strips_surrounding_whitespace_from_output():
     assert sandbox_exec.run_code_once("result = 1", manager=fake)["calc_result"] == "52000.0"
 
 
-def test_run_code_once_degrades_when_manager_unavailable(monkeypatch):
-    """阶段 5 修复：拿不到 Docker 调度器时必须降级，不得上抛"""
-    def _boom():
-        raise RuntimeError("Docker daemon 不可用")
-
-    monkeypatch.setattr(sandbox_exec, "get_sandbox_manager", _boom)
-    res = sandbox_exec.run_code_once("result = 6 * 7")
-    assert res["via"] == "local"
-    assert res["error"] is None
-    assert res["calc_result"] == "42"
+def test_run_code_once_fails_closed_when_manager_unavailable(monkeypatch):
+    def fail():
+        raise RuntimeError("Docker unavailable")
+    monkeypatch.setattr(sandbox_exec, "get_sandbox_manager", fail)
+    monkeypatch.setattr(sandbox_exec, "run_in_process", lambda code: pytest.fail("Host execution is forbidden"))
+    result = sandbox_exec.run_code_once("result = 42")
+    assert result["calc_result"] is None and "unavailable" in result["error"]
 
 
-def test_run_code_once_degrades_when_execute_raises(monkeypatch):
-    """阶段 5 修复：DockerException 之类必须在入口处被吞掉
-
-    原先 soul.node_execute_code 只 catch ImportError，Docker 抛的
-    DockerException 会直接打断整张图。
-    """
-    fake = FakeManager(raise_on_execute=RuntimeError("DockerException: 容器已退出"))
-    res = sandbox_exec.run_code_once("result = 1 + 1", manager=fake)
-    assert res["via"] == "local"
-    assert res["calc_result"] == "2"
+def test_run_code_once_fails_closed_when_execute_raises(monkeypatch):
+    fake = FakeManager(raise_on_execute=RuntimeError("container stopped"))
+    monkeypatch.setattr(sandbox_exec, "run_in_process", lambda code: pytest.fail("Host execution is forbidden"))
+    result = sandbox_exec.run_code_once("result = 42", manager=fake)
+    assert result["calc_result"] is None and result["error"]
 
 
-def test_run_code_once_degrades_when_start_session_raises():
-    fake = FakeManager(raise_on_start=RuntimeError("无法获取沙箱端口映射"))
-    res = sandbox_exec.run_code_once("result = 'ok'")
-    assert res == {"calc_result": "ok", "error": None,
-                   "session_id": None, "via": "local"}
-
-    fake2 = FakeManager(raise_on_start=RuntimeError("端口映射失败"))
-    res2 = sandbox_exec.run_code_once("result = 'ok'", manager=fake2)
-    assert res2["via"] == "local"
+def test_run_code_once_fails_closed_when_start_raises():
+    result = sandbox_exec.run_code_once("result = 42", manager=FakeManager(raise_on_start=RuntimeError("start failed")))
+    assert result["calc_result"] is None and "start failed" in result["error"]
 
 
 # ============================================================================
@@ -294,41 +280,35 @@ def test_image_name_can_be_overridden(manager):
     assert DockerSandboxManager(image_name="custom:tag").image_name == "custom:tag"
 
 
-def test_execute_code_passes_timeout_to_requests(manager, monkeypatch):
-    """超时值必须真的传给 requests，否则配置形同虚设"""
-    sid = "sandbox_timeout_test"
-    manager.active_containers[sid] = {
-        "container": None, "url": "http://127.0.0.1:9/execute", "last_active": time.time(),
-    }
-    seen = {}
-
-    def _fake_post(url, json=None, timeout=None):
-        seen["url"] = url
-        seen["json"] = json
-        seen["timeout"] = timeout
-        raise requests.Timeout("read timed out")
-
-    monkeypatch.setattr(sandbox_manager.requests, "post", _fake_post)
-
-    res = manager.execute_code(sid, "result = 1")
-    assert seen["timeout"] == manager.execution_timeout
-    assert seen["json"] == {"code": "result = 1"}
-    assert res["output"] == ""
-    assert str(manager.execution_timeout) in res["error"]
-    assert "Timeout" in res["error"]
+def test_execute_code_timeout_actually_removes_the_container(manager):
+    import threading
+    removed = threading.Event()
+    class Container:
+        def exec_run(self, command):
+            removed.wait(1)
+            return types.SimpleNamespace(exit_code=0, output=b'{}')
+        def remove(self, force=False):
+            assert force
+            removed.set()
+    manager.execution_timeout = 0.02
+    manager.active_containers["slow"] = {"container": Container(), "last_active": time.time()}
+    started = time.monotonic()
+    result = manager.execute_code("slow", "while True: pass")
+    assert result["error_kind"] == "timeout" and removed.is_set()
+    assert time.monotonic() - started < 0.5
 
 
-def test_execute_code_maps_communication_error(manager, monkeypatch):
-    sid = "sandbox_comm_error"
-    manager.active_containers[sid] = {
-        "container": None, "url": "http://127.0.0.1:9/execute", "last_active": time.time(),
-    }
-    monkeypatch.setattr(sandbox_manager.requests, "post",
-                        lambda *a, **kw: (_ for _ in ()).throw(ConnectionError("拒绝连接")))
-
-    res = manager.execute_code(sid, "result = 1")
-    assert res["output"] == ""
-    assert "Sandbox communication error" in res["error"]
+def test_execute_code_communication_failure_is_explicit_and_cleans_up(manager):
+    removed = []
+    class Container:
+        def exec_run(self, command):
+            raise sandbox_manager.docker.errors.APIError("Docker stopped")
+        def remove(self, force=False):
+            removed.append(force)
+    manager.active_containers["broken"] = {"container": Container(), "last_active": time.time()}
+    with pytest.raises(sandbox_manager.docker.errors.APIError):
+        manager.execute_code("broken", "result=1")
+    assert removed == [True]
 
 
 def test_execute_code_rejects_unknown_session(manager):
@@ -337,16 +317,13 @@ def test_execute_code_rejects_unknown_session(manager):
     assert "不存在" in str(ei.value)
 
 
-def test_execute_code_refreshes_last_active(manager, monkeypatch):
-    sid = "sandbox_touch"
+def test_execute_code_refreshes_last_active(manager):
+    container = types.SimpleNamespace(exec_run=lambda cmd: types.SimpleNamespace(
+        exit_code=0, output=b'{"output":"ok","error":null}'))
     old = time.time() - 9999
-    manager.active_containers[sid] = {
-        "container": None, "url": "http://127.0.0.1:9/execute", "last_active": old,
-    }
-    monkeypatch.setattr(sandbox_manager.requests, "post",
-                        lambda *a, **kw: types.SimpleNamespace(json=lambda: {"output": "ok"}))
-    manager.execute_code(sid, "result = 1")
-    assert manager.active_containers[sid]["last_active"] > old
+    manager.active_containers["touch"] = {"container": container, "last_active": old}
+    assert manager.execute_code("touch", "result=1")["output"] == "ok"
+    assert manager.active_containers["touch"]["last_active"] > old
 
 
 # ============================================================================
@@ -382,23 +359,20 @@ def test_destroy_session_falls_back_to_name_lookup(manager, fake_container):
     assert fake_container.removed is True
 
 
-def test_destroy_session_silently_returns_when_container_missing(manager):
-    def _get(name):
-        raise Exception("No such container: " + name)
+def test_destroy_session_is_idempotent_when_container_missing(manager):
+    def missing(name):
+        raise sandbox_manager.docker.errors.NotFound("absent")
+    _with_fake_containers(manager, missing)
+    manager.destroy_session("sandbox_absent")
 
-    _with_fake_containers(manager, _get)
-    manager.destroy_session("sandbox_never_existed")   # 不应抛异常
 
-
-def test_destroy_session_swallows_remove_error(manager):
-    class _BadContainer:
+def test_destroy_session_reports_remove_error(manager):
+    class Container:
         def remove(self, force=False):
-            raise RuntimeError("容器正忙")
-
-    manager.active_containers["sandbox_bad"] = {
-        "container": _BadContainer(), "url": "", "last_active": time.time(),
-    }
-    manager.destroy_session("sandbox_bad")   # 不应抛异常
+            raise RuntimeError("busy")
+    manager.active_containers["busy"] = {"container": Container(), "last_active": time.time()}
+    with pytest.raises(RuntimeError, match="busy"):
+        manager.destroy_session("busy")
 
 
 # ============================================================================

@@ -12,6 +12,12 @@ WORKERS_DIR="$APP_ROOT/asynchronization/workers"
 PYTHONPATH="$APP_ROOT:$APP_ROOT/asynchronization:$WORKERS_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
 
+# New default: one shared runtime, same-host SQLite and checkpoint volume.
+# AGENT_RUNTIME=0 is only for explicitly draining the historical stage topics.
+if [ "${AGENT_RUNTIME:-1}" = "1" ]; then
+    exec python -u -m agent_runtime.worker
+fi
+
 # -u 关闭输出缓冲，否则 k8s 里看不到实时日志
 case "$WORKER_TYPE" in
     planner)

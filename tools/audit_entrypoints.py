@@ -75,6 +75,14 @@ class EntryPoint:
 # 清单：每一行都是一个人工判断，工具负责验证这个判断还成立
 # ============================================================================
 REGISTRY: list[EntryPoint] = [
+    EntryPoint("legal_agent/workflow.py", "legal_agent.workflow", "ok", "no-main"),
+    EntryPoint("legal_agent/llm.py", "legal_agent.llm", "ok", "no-main"),
+    EntryPoint("agent_runtime/service.py", "agent_runtime.service", "ok", "no-main"),
+    EntryPoint("agent_runtime/api.py", "agent_runtime.api", "ok", "no-main"),
+    EntryPoint("agent_runtime/worker.py", "agent_runtime.worker", "ok", "needs:Kafka"),
+    EntryPoint("agent_runtime/demo.py", "agent_runtime.demo", "ok", "covered-by-ci"),
+    EntryPoint("agent_tools/calculator.py", "agent_tools.calculator", "ok", "no-main"),
+    EntryPoint("agent_tools/sandbox/runner.py", "agent_tools.sandbox.runner", "ok", "needs:container"),
     # ---------------- 根目录：核心库 ----------------
     EntryPoint("config_loader.py", "config_loader", "ok", "no-main",
                "配置单一真源；缺必填项只告警不抛（validate(strict) 才抛）"),

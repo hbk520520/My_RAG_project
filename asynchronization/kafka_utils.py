@@ -122,10 +122,7 @@ def quarantine_message(msg, error, logger=None):
     log.error(f"消息处理失败，写入 DLQ 并跳过: topic={topic} key={key} {error_text}",
               exc_info=True)
 
-    try:
-        from observability import push_to_dlq
-        push_to_dlq(topic, str(key),
-                    value if isinstance(value, dict) else {"raw": str(value)},
-                    error_text)
-    except Exception as de:
-        log.error(f"DLQ 写入不可用: {de}") 
+    from observability import push_to_dlq
+    if not push_to_dlq(topic, str(key),
+                       value if isinstance(value, dict) else {"raw": str(value)}, error_text):
+        raise RuntimeError("DLQ write failed; Kafka offset must not be committed")

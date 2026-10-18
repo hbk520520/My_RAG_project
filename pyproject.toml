@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "legal-rag-agent"
+version = "0.1.0"
+description = "Single-host durable Agent with grounded legal retrieval"
+requires-python = ">=3.13"
+dynamic = ["dependencies"]
+
+[project.scripts]
+legal-agent = "agent_runtime.__main__:main"
+
+[tool.setuptools]
+py-modules = ["config_loader", "prompts", "double_layer_plan", "replanner_rules", "observability", "query"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["legal_agent*", "agent_runtime*", "agent_tools*", "dataset*", "causal_evidence*", "asynchronization*", "model*"]
+exclude = ["tests*", "outputs*", "dataset.corpus_out*"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

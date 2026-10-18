@@ -8,7 +8,9 @@ llm:
   api_key: "${DEEPSEEK_API_KEY}"
   base_url: "https://api.deepseek.com"
   judge_model: "deepseek-chat"
-  backend: "auto"              # "vllm" / "api" / "auto"
+  backend: "api"               # api/auto use configured API; explicit vllm fails if unavailable
+  request_timeout: 30
+  transport_retries: 1
   temperature_plan: 0.1
   temperature_extract: 0.1
   temperature_reason: 0.1
@@ -125,7 +127,8 @@ causal_evidence:
 
 # --- 沙箱 ---
 sandbox:
-  image: "legal-sandbox:v1"
+  image: "legal-sandbox:v2"
+  max_output_bytes: 65536
   mem_limit: "512m"
   cpu_quota: 50000
   network_mode: "none"
@@ -138,6 +141,14 @@ agent:
   max_recursion_depth: 5
   max_retries_per_task: 2
   wormhole_threshold: 2      # 失败超过此次数触发虫洞
+
+# One host, one leased executor; API and Kafka share this authority.
+runtime:
+  enabled: true
+  path: ".runtime/runs.sqlite"
+  pending_topic: "topic.agent.pending"
+  result_topic: "topic.agent.result"
+  api_token: "${AGENT_API_TOKEN}"
 
 # --- 可观测性 ---
 observability:

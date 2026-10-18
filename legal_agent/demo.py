@@ -68,7 +68,8 @@ def main():
     reasoner = Reasoner(legal_graph=graph_engine, embedding_fn=mock_embedding, agentic_ops=mock_ops)
 
     # 5. 构建并运行智能体
-    agent = build_plan_replan_agent(reasoner, mock_ops)
+    from agent_tools.sandbox.executor import run_in_process
+    agent = build_plan_replan_agent(reasoner, mock_ops, code_runner=lambda code, **kwargs: run_in_process(code))
 
     initial_state = {
         "user_query": "试用期最后一天被辞退，能拿多少赔偿？",

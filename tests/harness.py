@@ -336,7 +336,9 @@ def make_agent(llm: ProgrammableLLM,
                         embedding_fn=lambda t: engine.encode_text(t)["dense"],
                         agentic_ops=ops)
 
-    agent = build_plan_replan_agent(reasoner, ops, checkpointer=checkpointer)
+    from agent_tools.sandbox.executor import run_in_process
+    agent = build_plan_replan_agent(reasoner, ops, checkpointer=checkpointer,
+                                   code_runner=lambda code, **kwargs: run_in_process(code))
     return agent, engine, ops
 
 

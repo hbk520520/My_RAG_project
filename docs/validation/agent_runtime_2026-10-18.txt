@@ -1,0 +1,464 @@
+Agent modularization and durable runtime validation, 2026-10-18
+Python: 3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:09:58) [MSC v.1929 64 bit (AMD64)]
+Workspace: D:\project(now)
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'tools/audit_entrypoints.py', '--check']
+RESULT: PASS
+结论：✅ 全部登记为 import-ok 的入口都能干净导入
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', '-m', 'compileall', '-q', '-x', '.git|__pycache__|.pytest_cache|saved_loras|RAG_data|training_data|outputs|.continue|.venv|venv', '.']
+RESULT: PASS
+Can't list '.\\.pytest_cache'
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', '-m', 'pytest', '-q']
+RESULT: PASS
+........................................................................ [ 13%]
+........................................................................ [ 27%]
+........................................................................ [ 40%]
+........................................................................ [ 54%]
+........................................................................ [ 67%]
+........................................................................ [ 81%]
+........................................................................ [ 94%]
+...........................                                              [100%]
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', '-m', 'agent_runtime.demo']
+RESULT: PASS
+{"pause": "passed", "reopen_resume": "passed", "rewind": "passed", "stale_epoch": "rejected"}
+配置项为空，相关功能会在首次调用时失败：
+  - llm.api_key  (LLM API Key)，可通过环境变量 ${DEEPSEEK_API_KEY} 提供
+（参考 .env.example 设置环境变量后重启即可）
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'dataset/graph.py']
+RESULT: PASS
+建图结果: 节点 3, 边 0
+脏摘要节点集合: {200}
+Summary 200 新内容: 根据最新法条，暴力犯罪量刑已更新。
+生成摘要节点 ID=201
+配置项为空，相关功能会在首次调用时失败：
+  - llm.api_key  (LLM API Key)，可通过环境变量 ${DEEPSEEK_API_KEY} 提供
+（参考 .env.example 设置环境变量后重启即可）
+INFO:LegalGraphEngine:图引擎初始化: dim=1024, alpha=0.3, connect=0.85, label=0.99
+INFO:LegalGraphEngine:使用预计算向量建图；缺少稀疏权重，相似度退化为纯余弦
+INFO:LegalGraphEngine:FAISS 批量注入完成，共 3 个节点。
+INFO:LegalGraphEngine:初始图谱构建完毕：3 个节点，0 条边。
+INFO:LegalGraphEngine:节点 101 已软删除（tombstone），对前端隐身
+INFO:LegalGraphEngine:摘要节点 200 标记为 dirty
+INFO:LegalGraphEngine:开始夜间局部重算，共 1 个脏摘要节点
+INFO:LegalGraphEngine:摘要节点 200 重算完成
+WARNING:LegalGraphEngine:子节点数 4 超过 max_cluster_size=2，本次只取前 2 条，其余留待后续降序聚类
+INFO:LegalGraphEngine:摘要节点 201 生成完成（参与文本 2 条，挂载子节点 2 个）
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'dataset/memory_graph_bridge.py']
+RESULT: PASS
+注入新知识: ID=1
+系统状态: {'graph_nodes': 1, 'graph_edges': 0, 'faiss_total': 1, 'gmm_summaries': 1, 'gmm_nodes': 2, 'gmm_dirty': 1, 'pending_sync': 0}
+自定义 embedding_fn 注入: ID=1
+自定义 embedding_fn 后系统状态: {'graph_nodes': 1, 'graph_edges': 0, 'faiss_total': 1, 'gmm_summaries': 1, 'gmm_nodes': 2, 'gmm_dirty': 1, 'pending_sync': 0}
+配置项为空，相关功能会在首次调用时失败：
+  - llm.api_key  (LLM API Key)，可通过环境变量 ${DEEPSEEK_API_KEY} 提供
+（参考 .env.example 设置环境变量后重启即可）
+INFO:LegalGraphEngine:图引擎初始化: dim=1024, alpha=0.3, connect=0.85, label=0.99
+INFO:MemorySniffer:无现有簇，自动创建根簇
+INFO:MemoryGraphBridge:双写成功: 节点 1 ('2025年最新司法解释：试用期辞退需支付赔偿金...')
+INFO:LegalGraphEngine:图引擎初始化: dim=1024, alpha=0.3, connect=0.85, label=0.99
+WARNING:MemoryGraphBridge:embedding_fn 只返回稠密向量，缺少稀疏权重 —— 混合相似度将退化为纯余弦（如需完整信号，请把 embedding_fn 留空以使用引擎编码器）
+INFO:MemorySniffer:无现有簇，自动创建根簇
+INFO:MemoryGraphBridge:双写成功: 节点 1 ('试用期工资不得低于本单位相同岗位最低档工资的80%...')
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'dataset/IncrementalMemoryManager.py']
+RESULT: PASS
+脏节点列表: [1]
+当前簇数量: 3
+清算后脏节点: []
+INFO:MemorySniffer:相似度样本仅 2 条（< 4），GMM 不适用，改用中位数阈值
+INFO:MemorySniffer:节点 5 动态阈值 0.5000，挂载到 1 个簇: [1]
+INFO:MemorySniffer:相似度样本仅 2 条（< 4），GMM 不适用，改用中位数阈值
+INFO:MemorySniffer:孤儿节点检测 (最高相似度 -0.2100 < 0.4)，创建新簇
+INFO:MemorySniffer:节点 1 已重写摘要
+INFO:MemorySniffer:节点 7 已重写摘要
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'multiple-search/soul.py']
+RESULT: PASS
+
+==================================================
+最终法律意见书：
+Mock 最终报告：您可以获得2N赔偿金。
+
+【计算未完成】
+沙箱多次执行失败: Traceback (most recent call last):
+  File "D:\project(now)\agent_tools\sandbox\executor.py", line 59, in run_in_process
+    exec(code, safe_globals)
+    ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1
+    Mock 回答
+         ^^
+SyntaxError: invalid syntax
+
+
+全部观察记录：
+【任务：核实劳动关系】【引擎：GRAPH_TRAVERSAL】
+事实：未检索到相关文档
+推理：无法回答
+因果证据与文本权重：
+
+⚠️ 信息不足，已添加补充任务：请尝试更宽泛的检索词：核实劳动关系
+【任务：Mock全局检索】【引擎：GLOBAL_DENSE_WORMHOLE】
+事实：未检索到相关文档
+推理：无法回答
+因果证据与文本权重：
+
+⚠️ 信息不足，已添加补充任务：请尝试更宽泛的检索词：Mock全局检索
+【任务：Mock全局检索】【引擎：GLOBAL_DENSE_WORMHOLE】
+事实：未检索到相关文档
+推理：无法回答
+因果证据与文本权重：
+
+⚠️ 信息不足，已添加补充任务：请尝试更宽泛的检索词：Mock全局检索
+【任务：Mock全局检索】【引擎：GLOBAL_DENSE_WORMHOLE】
+事实：未检索到相关文档
+推理：无法回答
+因果证据与文本权重：
+
+⚠️ 信息不足，已添加补充任务：请尝试更宽泛的检索词：Mock全局检索
+【任务：Mock全局检索】【引擎：GLOBAL_DENSE_WORMHOLE】
+事实：未检索到相关文档
+推理：无法回答
+因果证据与文本权重：
+
+⚠️ 信息不足，已添加补充任务：请尝试更宽泛的检索词：Mock全局检索
+
+全局事实：
+配置项为空，相关功能会在首次调用时失败：
+  - llm.api_key  (LLM API Key)，可通过环境变量 ${DEEPSEEK_API_KEY} 提供
+（参考 .env.example 设置环境变量后重启即可）
+INFO:LegalGraphEngine:图引擎初始化: dim=1024, alpha=0.3, connect=0.85, label=0.99
+INFO:LegalGraphEngine:使用预计算向量建图；缺少稀疏权重，相似度退化为纯余弦
+INFO:LegalGraphEngine:FAISS 批量注入完成，共 2 个节点。
+INFO:LegalGraphEngine:初始图谱构建完毕：2 个节点，0 条边。
+INFO:LegalAgentPlanReplan:Planner 启动，生成执行计划
+INFO:legal_agent.demo:Mock LLM called with: 你是顶级法律案件拆解专家（Meta-Planner）。面对复杂法律问题，生成双层蓝图（抽象DAG +...
+INFO:LegalAgentPlanReplan:Executor 正在处理: 核实劳动关系
+INFO:LegalAgentPlanReplan:触发虫洞重规划引擎 (LLM)
+INFO:legal_agent.demo:Mock LLM called with: 你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前某一个子任务的...
+INFO:LegalAgentPlanReplan:🌌 虫洞穿越模式激活 (engine=GLOBAL_DENSE_WORMHOLE): Mock全局检索
+INFO:LegalAgentPlanReplan:Executor 正在处理: Mock全局检索
+INFO:LegalAgentPlanReplan:触发虫洞重规划引擎 (LLM)
+INFO:legal_agent.demo:Mock LLM called with: 你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前某一个子任务的...
+INFO:LegalAgentPlanReplan:🌌 虫洞穿越模式激活 (engine=GLOBAL_DENSE_WORMHOLE): Mock全局检索
+INFO:LegalAgentPlanReplan:Executor 正在处理: Mock全局检索
+INFO:LegalAgentPlanReplan:触发虫洞重规划引擎 (LLM)
+INFO:legal_agent.demo:Mock LLM called with: 你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前某一个子任务的...
+INFO:LegalAgentPlanReplan:🌌 虫洞穿越模式激活 (engine=GLOBAL_DENSE_WORMHOLE): Mock全局检索
+INFO:LegalAgentPlanReplan:Executor 正在处理: Mock全局检索
+INFO:LegalAgentPlanReplan:触发虫洞重规划引擎 (LLM)
+INFO:legal_agent.demo:Mock LLM called with: 你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前某一个子任务的...
+INFO:LegalAgentPlanReplan:🌌 虫洞穿越模式激活 (engine=GLOBAL_DENSE_WORMHOLE): Mock全局检索
+INFO:LegalAgentPlanReplan:Executor 正在处理: Mock全局检索
+INFO:LegalAgentPlanReplan:触发虫洞重规划引擎 (LLM)
+INFO:legal_agent.demo:Mock LLM called with: 你是一个经过强化学习训练的顶级重规划引擎 (Replanner)。
+【核心任务】：当前某一个子任务的...
+WARNING:LegalAgentPlanReplan:🚨 触发算力熔断（depth=5 > 5），强制终止
+WARNING:LegalAgentPlanReplan:算力熔断，强制终止
+INFO:LegalAgentPlanReplan:Generator 生成最终法律意见书
+INFO:legal_agent.demo:Mock LLM called with: 你是资深律师（Generator）。结合已验证的上下文证据链，生成专业、直接回答用户问题的法律意见书...
+INFO:LegalAgentPlanReplan:检测到金额计算需求，将进入沙箱执行流程
+INFO:LegalAgentPlanReplan:📝 沙箱阶段: 生成计算代码
+INFO:legal_agent.demo:Mock LLM called with: 你是一名精通中国劳动法的法官助理兼Python程序员。
+根据以下案件事实和推理链，编写一段纯 Pyt...
+INFO:LegalAgentPlanReplan:🐳 沙箱阶段: 执行计算代码
+WARNING:LegalAgentPlanReplan:沙箱执行报错（via=local）: Traceback (most recent call last):
+  File "D:\project(now)\agent_tools\sandbox\executor.py", line 59, in run_in_process
+    exec(code, safe_globals)
+    ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1
+    Mock 回答
+         ^^
+SyntaxError: invalid syntax
+
+INFO:LegalAgentPlanReplan:沙箱重试 1/3
+INFO:LegalAgentPlanReplan:📝 沙箱阶段: 生成计算代码
+INFO:legal_agent.demo:Mock LLM called with: 你是一名精通中国劳动法的法官助理兼Python程序员。
+根据以下案件事实和推理链，编写一段纯 Pyt...
+INFO:LegalAgentPlanReplan:🐳 沙箱阶段: 执行计算代码
+WARNING:LegalAgentPlanReplan:沙箱执行报错（via=local）: Traceback (most recent call last):
+  File "D:\project(now)\agent_tools\sandbox\executor.py", line 59, in run_in_process
+    exec(code, safe_globals)
+    ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1
+    Mock 回答
+         ^^
+SyntaxError: invalid syntax
+
+INFO:LegalAgentPlanReplan:沙箱重试 2/3
+INFO:LegalAgentPlanReplan:📝 沙箱阶段: 生成计算代码
+INFO:legal_agent.demo:Mock LLM called with: 你是一名精通中国劳动法的法官助理兼Python程序员。
+根据以下案件事实和推理链，编写一段纯 Pyt...
+INFO:LegalAgentPlanReplan:🐳 沙箱阶段: 执行计算代码
+WARNING:LegalAgentPlanReplan:沙箱执行报错（via=local）: Traceback (most recent call last):
+  File "D:\project(now)\agent_tools\sandbox\executor.py", line 59, in run_in_process
+    exec(code, safe_globals)
+    ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1
+    Mock 回答
+         ^^
+SyntaxError: invalid syntax
+
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'benchmark_causal/run_demo.py']
+RESULT: PASS
+
+==============================================================================
+0. 法条语料
+==============================================================================
+  条目 1428 · 法律 9 部 · 其中已废止 428 条
+  来源 ['LawRefBook/Laws@24f29392293c']
+
+==============================================================================
+1. 第 0 层：审计 SCM 的法条锚点（存在性 + 时效性）
+==============================================================================
+
+  [labor-ot-001] 案件发生日 2024-06-15
+    OK  劳动法第四十四条                         劳动法第四十四条 在 2024-06-15 有效
+    OK  劳动合同法第三十九条                       劳动合同法第三十九条 在 2024-06-15 有效
+    OK  劳动合同法第八十七条                       劳动合同法第八十七条 在 2024-06-15 有效
+    OK  劳动合同法第四十七条                       劳动合同法第四十七条 在 2024-06-15 有效
+    OK  劳动合同法第十条                         劳动合同法第十条 在 2024-06-15 有效
+    OK  劳动合同法第八十二条                       劳动合同法第八十二条 在 2024-06-15 有效
+
+  [labor-dis-001] 案件发生日 2024-06-15
+    OK  劳动法第四十四条                         劳动法第四十四条 在 2024-06-15 有效
+    OK  劳动合同法第三十九条                       劳动合同法第三十九条 在 2024-06-15 有效
+    OK  劳动合同法第八十七条                       劳动合同法第八十七条 在 2024-06-15 有效
+    OK  劳动合同法第四十七条                       劳动合同法第四十七条 在 2024-06-15 有效
+    OK  劳动合同法第十条                         劳动合同法第十条 在 2024-06-15 有效
+    OK  劳动合同法第八十二条                       劳动合同法第八十二条 在 2024-06-15 有效
+
+  不合格锚点 = 0（应为 0：法条不是真实有效的，题就不合法）
+
+==============================================================================
+2. 因果图（法=规范性边，有此锚点；事=案情内事实关联）
+==============================================================================
+
+劳动争议 · 加班费与夜班津贴诉求（含混杂因子） (labor_overtime_claim)
+  结果变量: total_claim
+  · [confounder] project_crunch = 项目赶工强度  域=('normal', 'crunch')
+  · [treatment] overtime_hours = 工作日加班时长
+  · [exogenous] hourly_wage = 折算小时工资
+  · [mediator] overtime_pay = 加班费
+  · [mediator] night_shift_allowance = 夜班津贴
+  · [outcome] total_claim = 可主张总额
+  project_crunch → overtime_hours   [事:赶工期间排班延长，加班时长随之上升]
+  project_crunch → night_shift_allowance   [事:赶工期间大量排夜班，产生夜班津贴]
+  overtime_hours → overtime_pay   [法:工作日延长工作时间，按不低于工资的百分之一百五十支付]  ← 《劳动法》第四十四条
+  hourly_wage → overtime_pay   [法:加班费以折算小时工资为基数]  ← 《劳动法》第四十四条
+  overtime_pay → total_claim   [事:加班费是可主张金额的组成部分]
+  night_shift_allowance → total_claim   [事:夜班津贴是可主张金额的组成部分]
+  overtime_hours := 赶工=60 小时，否则=10 小时   ←
+  overtime_pay := 加班费 = 加班时长 × 小时工资 × 150%   ← 《劳动法》第四十四条
+  night_shift_allowance := 赶工=300 元，正常=0 元   ←
+  total_claim := 可主张总额 = 加班费 + 夜班津贴   ←
+  → treatment=overtime_hours  outcome=total_claim  has_confounder=True
+  → 混杂因子 ['project_crunch']：do(混杂因子) 会切断它对 overtime_hours 的输入
+
+劳动争议 · 违法解除赔偿金与未签合同二倍工资 (labor_unlawful_dismissal)
+  结果变量: total_amount
+  · [treatment] dismissal_ground = 解除事由  域=('employee_fault', 'lawful', 'unlawful', 'agreed')
+  · [exogenous] years_of_service = 在本单位工作年限
+  · [exogenous] monthly_wage = 解除前十二个月平均月工资
+  · [exogenous] months_without_contract = 未订立书面合同的月数
+  · [mediator] compensation_months = 经济补偿月数
+  · [mediator] severance_amount = 赔偿金/经济补偿
+  · [mediator] double_wage_amount = 未签书面合同二倍工资差额
+  · [outcome] total_amount = 应支付总额
+  dismissal_ground → compensation_months   [法:过失性解除无经济补偿；违法解除按经济补偿标准的二倍]  ← 《劳动合同法》第三十九条、《劳动合同法》第八十七条
+  years_of_service → compensation_months   [法:经济补偿按在本单位工作年限计算]  ← 《劳动合同法》第四十七条
+  compensation_months → severance_amount   [法:经济补偿以月数 × 月工资为基数]  ← 《劳动合同法》第四十七条
+  monthly_wage → severance_amount   [法:以解除前十二个月平均月工资为基数]  ← 《劳动合同法》第四十七条
+  months_without_contract → double_wage_amount   [法:超过一个月不满一年未订立书面合同的，每月支付二倍工资]  ← 《劳动合同法》第十条、《劳动合同法》第八十二条
+  monthly_wage → double_wage_amount   [法:二倍工资差额以月工资为基数]  ← 《劳动合同法》第八十二条
+  severance_amount → total_amount   [事:应支付总额包含赔偿金/经济补偿]
+  double_wage_amount → total_amount   [事:应支付总额包含二倍工资差额]
+  compensation_months := N = f(解除事由, 工作年限)；违法解除取 2N；过失性解除取 0   ← 《劳动合同法》第三十九条、《劳动合同法》第四十七条、《劳动合同法》第八十七条
+  severance_amount := 赔偿金 = 经济补偿月数 × 月工资   ← 《劳动合同法》第四十七条、《劳动合同法》第八十七条
+  double_wage_amount := 二倍工资差额 = min(max(未签月数 − 1, 0), 11) × 月工资   ← 《劳动合同法》第八十二条
+  total_amount := 应支付总额 = 赔偿金 + 二倍工资差额   ←
+  → treatment=dismissal_ground  outcome=total_amount  has_confounder=False
+
+==============================================================================
+3. 出题：L1 观测 / L2 干预 / L3 反事实 / L3′ 抗扰动
+==============================================================================
+
+=== labor-ot-001 [labor_overtime_claim] ===
+  案情: 某互联网公司于 2024 年 3 月启动重点版本上线，全体研发进入「赶工」状态：工作日普遍延长工作时间，且大量安排夜班。技术员张某在该期间累计工作日延长工作时间 60 小时，其折算小时工资为 40 元/小时。公司因赶工统一安排了夜班，但截至离职未支付任何加班费，也未支付夜班津贴。
+  外生取值: {'project_crunch': 'crunch', 'hourly_wage': 40.0}
+  L1 观测: do={}
+      → 劳动者可主张总额为 3900 元
+      → 推理链 6 步
+  L2 干预: do={'project_crunch': 'normal'}
+      → 劳动者可主张总额为 600 元
+      → 推理链 6 步
+  L3 反事实: do={'project_crunch': 'normal', 'overtime_hours': 60.0}
+      → 劳动者可主张总额为 3600 元
+      → 推理链 6 步
+
+    L1     labor-ot-001-L1            标准答案 =   3,900.00 元   混杂因子项适用=False
+    L2     labor-ot-001-L2            标准答案 =     600.00 元   混杂因子项适用=False
+    L3     labor-ot-001-L3            标准答案 =   3,600.00 元   混杂因子项适用=True
+    抗扰动    labor-ot-001-L3-perturb    标准答案 =   3,600.00 元   混杂因子项适用=True
+
+=== labor-dis-001 [labor_unlawful_dismissal] ===
+  案情: 李某于 2021 年 3 月 1 日入职某公司，离职前十二个月平均工资 8000 元，双方自入职即签订书面劳动合同（未出现未签书面合同的情形）。2024 年 6 月 15 日，公司以「部门取消」为由口头通知李某次日无需上班，既未提前三十日书面通知，也未与李某协商变更劳动合同，且未支付任何补偿。
+  外生取值: {'dismissal_ground': 'unlawful', 'years_of_service': 3.0, 'monthly_wage': 8000.0, 'months_without_contract': 0.0}
+  L1 观测: do={}
+      → 用人单位应支付总额为 48000 元
+      → 推理链 8 步
+  L2 干预: do={'dismissal_ground': 'lawful'}
+      → 用人单位应支付总额为 24000 元
+      → 推理链 8 步
+  L3 反事实: do={'dismissal_ground': 'lawful'}
+      → 用人单位应支付总额为 24000 元
+      → 推理链 8 步
+
+    L1     labor-dis-001-L1           标准答案 =  48,000.00 元   混杂因子项适用=False
+    L2     labor-dis-001-L2           标准答案 =  24,000.00 元   混杂因子项适用=False
+    L3     labor-dis-001-L3           标准答案 =  24,000.00 元   混杂因子项适用=False
+    抗扰动    labor-dis-001-L3-perturb   标准答案 =  24,000.00 元   混杂因子项适用=False
+
+==============================================================================
+4. 评分：三种假作答的区分度
+==============================================================================
+
+  ① 正确作答
+     L1  得分 1.0000 硬门禁=过
+     L2  得分 1.0000 硬门禁=过
+     L3  得分 1.0000 硬门禁=过
+     → 因果一致性率 = 1.0 （L1/L2/L3 全对才计 1；逐层平均分 {1: 1.0, 2: 1.0, 3: 1.0}）
+
+  ② 天真作答（以为不赶工→加班少→加班费少）
+     L1  得分 1.0000 硬门禁=过
+     L2  得分 1.0000 硬门禁=过
+     L3  得分 0.0000 硬门禁=不过  ← 结论缺少关键数值：[3600.0]；金额不匹配：应为 3600 元，实得 600 元
+     → 因果一致性率 = 0.0 （L1/L2/L3 全对才计 1；逐层平均分 {1: 1.0, 2: 1.0, 3: 0.0}）
+
+  ③ 编造法条作答（内容对但引了不存在的条文）
+     L1  得分 0.0000 硬门禁=不过  ← 引用了不存在的法条：劳动法第九千九百九十九条
+     L2  得分 1.0000 硬门禁=过
+     L3  得分 1.0000 硬门禁=过
+     → 因果一致性率 = 0.0 （L1/L2/L3 全对才计 1；逐层平均分 {1: 0.0, 2: 1.0, 3: 1.0}）
+
+  ④ 引用已废止法条（2024 年案子引《合同法》）
+     L1  得分 0.0000 硬门禁=不过  ← 合同法第一百零七条 在案件发生日 2024-06-15 已失效 —— 合同法第107条 在案件发生日 2024-06-15 无效（该法条有效
+     L2  得分 1.0000 硬门禁=过
+     L3  得分 1.0000 硬门禁=过
+     → 因果一致性率 = 0.0 （L1/L2/L3 全对才计 1；逐层平均分 {1: 0.0, 2: 1.0, 3: 1.0}）
+
+  ⑤ 无引证作答
+     L1  得分 0.0000 硬门禁=不过  ← 未引用任何法条（本项目要求结论必须可溯源到法条）
+     L2  得分 1.0000 硬门禁=过
+     L3  得分 1.0000 硬门禁=过
+     → 因果一致性率 = 0.0 （L1/L2/L3 全对才计 1；逐层平均分 {1: 0.0, 2: 1.0, 3: 1.0}）
+
+==============================================================================
+5. 结论
+==============================================================================
+  · 评分的第一原则：能用 Python 判的绝不交给 LLM
+      — 法条存在性、时效性、格式、金额精确匹配 都是确定性硬门禁
+      — 只有「因果链命中率」「混杂因子是否隔离」才需要裁判
+  · 三层答案由同一套结构方程推导 → 天然自洽，不会把模型冤判成错
+  · L3 的答案是 3600 而不是 600：必须理解 do(Z) 已切断 Z→X 的路径
+  共生成 8 道题（含抗扰动题）
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'multiple-search/legal_sandbox/example_usage.py']
+RESULT: PASS
+==================================================================
+沙箱集成示例 —— 成功路径 / 失败路径 / 清理
+==================================================================
+
+[成功路径] next_action=evaluate
+           结果=20000
+
+[失败路径] next_action=write_code
+           错误=ValueError: boom
+
+[清理] sandbox_session_id=None
+
+✅ 示例结论：成功/失败/清理三条路径行为符合 docs/CONTRACTS.md 契约 7
+配置项为空，相关功能会在首次调用时失败：
+  - llm.api_key  (LLM API Key)，可通过环境变量 ${DEEPSEEK_API_KEY} 提供
+（参考 .env.example 设置环境变量后重启即可）
+INFO:SandboxExample:[Hop 1] 沙箱执行成功（via=local）
+WARNING:SandboxExample:沙箱报错（via=local）: Traceback (most recent call last):
+  File "D:\project(now)\agent_tools\sandbox\executor.py", line 59, in run_in_process
+    exec(code, safe_globals)
+    ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<string>", line 1, in <module>
+ValueError: boom
+
+
+
+COMMAND: ['D:\\project(now)\\.venv\\Scripts\\python.exe', 'spikes/spike_checkpoint_resume.py']
+RESULT: PASS
+临时目录 D:\project(now)\outputs\temp\spike_p0_szhbnlc2
+代码库 D:\project(now)
+
+[V1/V2] 子进程 A：跑到 interrupt 挂起，然后退出进程…
+[V4] 恢复前，模拟同一条任务重复投递 3 次…
+[V3] 子进程 B：另起进程，重新打开同一 sqlite，从中断点恢复…
+
+==============================================================================
+P0 Spike 结果
+==============================================================================
+  [OK  ] V2  interrupt() 真的挂起（且进程正常退出 = 未阻塞等待）
+         子进程 exit=0；interrupted=True；挂起时 final_report=False（应为 False）
+  [OK  ] V1  检查点落盘（sqlite 里有内容，不是纯内存）
+         checkpoints.sqlite = 20480 B
+  [OK  ] V1b  任务已下发给「总线」（模拟 Kafka 生产）
+         总线上任务数 = 1；attempts=1；dispatched=1
+  [OK  ] V4  节点确实被重复执行，但副作用只发生一次（幂等）
+         节点执行 4 次（含重复投递）、实际派发 1 次、总线上任务 1 条 —— 期望「执行多次 / 派发一次」
+  [OK  ] V3  跨进程恢复：新进程从中断点继续并跑到 END
+         exit=0；final_report='依据远端结果出具意见：赔偿金 48000 元'；still_interrupted=False
+  [OK  ] V3b  恢复时节点重跑，但幂等仍生效（未重复派发）
+         节点累计执行 5 次、实际派发 1 次、总线任务 1 条（期望 派发=1 且 总线=1）
+
+结论：✅ 6/6 项全部通过 —— **可以进入 P1**（LangGraph Checkpointer 路线成立）
+
+
+CI EXIT: 0
+
+FINAL COUNT CHECK
+COMMAND: .\.venv\Scripts\python.exe -B -m pytest --collect-only -q -o addopts=--strict-markers -o cache_dir=outputs/pytest-cache
+RESULT: 531 tests collected in 3.46s; exit 0.
+The full pytest run above executed all collected tests successfully (531 passed).
+
+ADDITIONAL COMPLETED CHECKS
+- Editable package installation: .\.venv\Scripts\python.exe -m pip install --no-deps --no-build-isolation -e . --cache-dir outputs/pip-cache (exit 0).
+- Installed CLI: .\.venv\Scripts\legal-agent.exe --help (exit 0).
+- D-drive launcher: .\tools\run.ps1 demo (exit 0; pause, reopen/resume, rewind and stale epoch checks passed).
+- git diff --check (exit 0; Git reported LF/CRLF conversion notices).
+
+VALIDATION HISTORY AND LIMITS
+- Output whitespace normalization: line-end spaces from demo output were removed for the repository whitespace check; substantive output is unchanged.
+- Before implementation: 491 tests passed with 2 existing SQLite ResourceWarnings.
+- Intermediate failures included a moved-import source assertion and a deterministic encoder fixture topic mismatch; both were corrected before the full final run.
+- Existing test SQLite connections are now explicitly closed; no warning summary appeared in the final pytest output above.
+- compileall returned 0 but printed "Can't list '.\\.pytest_cache'"; this cache directory was outside the intended source check. The message is retained above.
+- Some offline examples deliberately print an exception to demonstrate failure handling; their process exit codes and assertions passed. Those traces are retained above.
+- Models, Kafka and Docker were replaced with deterministic test doubles. No live provider quality evaluation, Kafka/Redis integration, Docker image build or GPU validation was performed.
+- The environment inherits global packages. Editable installation used --no-deps; this does not prove a fresh environment can install all requirements.
+- FlagEmbedding and redisvl are absent from this environment. Real BGE retrieval requires its dependencies and model assets; RedisVL is optional for the default local runtime.
+- requirements-runtime.constraints.txt records installed direct dependency versions, not a complete transitive lock.
+- The repository has no separate established lint/type-check pipeline. No lint/type-check success is claimed.

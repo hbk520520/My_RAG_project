@@ -64,7 +64,7 @@ def call_grader_llm(task_desc: str, docs: str) -> dict:
         return json.loads(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"Grader LLM 调用失败: {e}")
-        return {"status": "irrelevant", "rationale": f"Grader 调用异常: {str(e)}"}
+        raise
 
 
 def prepare_grader_evidence(state: dict, task_desc: str, last_obs: dict, call=None):
@@ -171,9 +171,9 @@ def main():
                 state["task_queue"] = task_queue
                 state["past_observations"] = past_observations
                 retry_context["fail_count"] = 0
-
+                state["retry_context"] = retry_context
                 state_manager.save_state(session_id, state)
-                producer.send(TOPIC_REASONER_PENDING, key=session_id,
+                producer.send(TOPIC_RETRIEVER_PENDING if task_queue else TOPIC_REASONER_PENDING, key=session_id,
                               value={"session_id": session_id})
 
             elif status == "partial":

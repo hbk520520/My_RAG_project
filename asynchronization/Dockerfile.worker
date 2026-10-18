@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.13-slim
 
 # 构建命令（在项目根目录执行，构建上下文必须是仓库根目录）：
 #   docker build -f asynchronization/Dockerfile.worker -t legal-agent-worker:latest .
@@ -21,6 +21,9 @@ COPY config.yaml config_loader.py prompts.py double_layer_plan.py observability.
 COPY asynchronization/ asynchronization/
 # Worker 的因果证据及既有检索/沙箱导入均需随镜像交付。
 COPY causal_evidence/ causal_evidence/
+COPY legal_agent/ legal_agent/
+COPY agent_runtime/ agent_runtime/
+COPY agent_tools/ agent_tools/
 COPY dataset/*.py dataset/
 COPY replanner_rules.py ./
 COPY multiple-search/legal_sandbox/ multiple-search/legal_sandbox/

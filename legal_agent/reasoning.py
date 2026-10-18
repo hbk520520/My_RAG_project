@@ -18,27 +18,38 @@ class Reasoner:
         self.agentic_ops = agentic_ops
         self.retrieval_trace = None
 
-    def retrieve(self, query: str) -> str:
+    def retrieve(self, query: str, *, engine_kind="GRAPH_TRAVERSAL") -> str:
         """从法律图谱检索相关文档，返回合并后的文本"""
-        return "\n---\n".join(hit["content"] for hit in self._retrieve_hits(query))
+        return "\n---\n".join(hit["content"] for hit in self._retrieve_hits(query, engine_kind))
 
-    def retrieve_records(self, query: str):
+    def retrieve_records(self, query: str, *, engine_kind="GRAPH_TRAVERSAL"):
         """保留原文来源和时间元数据；因果图不能从语义相似边推导。"""
         from causal_evidence.pipeline import evidence_from_hit
-        return [evidence_from_hit(hit) for hit in self._retrieve_hits(query)]
+        return [evidence_from_hit(hit) for hit in self._retrieve_hits(query, engine_kind)]
 
-    def _retrieve_hits(self, query: str):
+    def _retrieve_hits(self, query: str, engine_kind="GRAPH_TRAVERSAL"):
+        from agent_runtime.context import tool_call
+        def read():
+            hits = self._read_hits(query, engine_kind)
+            return {"hits": hits, "trace": self.retrieval_trace}
+        result = tool_call("retrieval", {"query": query, "engine": engine_kind}, read)
+        self.retrieval_trace = result["trace"]
+        return result["hits"]
+
+    def _read_hits(self, query, engine_kind):
         from dataset.document_navigation import retrieve
         self.retrieval_trace = None
         if not self.legal_graph:
             return []
-        self.legal_graph.refresh_memory()
-        result = retrieve(self.legal_graph, query, lambda: self._vector_hits(query),
+        from agent_runtime.context import current_run
+        if current_run.get() is None:
+            self.legal_graph.refresh_memory()
+        result = retrieve(self.legal_graph, query, lambda: self._vector_hits(query, engine_kind),
                           lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0))
         self.retrieval_trace = result.trace
         return result.hits
 
-    def _vector_hits(self, query: str):
+    def _vector_hits(self, query: str, engine_kind="GRAPH_TRAVERSAL"):
         if not self.legal_graph:
             return []
         graph_encoding = (self.legal_graph._memory_store is not None
@@ -62,94 +73,40 @@ class Reasoner:
                                  "score": float(sim)})
                 except ValueError:
                     pass
+        if engine_kind == "GRAPH_TRAVERSAL":
+            from .retrieval import _graph_expand
+            docs.extend(_graph_expand(self.legal_graph, docs, k))
+        elif engine_kind != "GLOBAL_DENSE_WORMHOLE":
+            raise ValueError(f"Unknown retrieval engine: {engine_kind}")
         from dataset.long_term_memory import source_evidence_hits
         return source_evidence_hits(self.legal_graph, docs, 5, norm_emb,
                                     original_only=cfg.get("causal_evidence", "enabled", default=False))
 
     def answer(self, sub_task: str, original_query: str, *, prediction_cutoff=None,
-               causal_targets=None) -> Dict[str, Any]:
+               causal_targets=None, engine_kind="GRAPH_TRAVERSAL", user_facts=None) -> Dict[str, Any]:
+        supplied = "\nUser-supplied case facts (not legal source evidence):\n" + "\n".join(user_facts) if user_facts else ""
         if cfg.get("causal_evidence", "enabled", default=False):
             from causal_evidence.pipeline import analyze_configured
             analysis = analyze_configured(
-                self.retrieve_records(sub_task), original_query,
+                (self.retrieve_records(sub_task) if engine_kind == "GRAPH_TRAVERSAL" else
+                 self.retrieve_records(sub_task, engine_kind=engine_kind)), original_query,
                 lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0),
                 prediction_cutoff=prediction_cutoff, targets=causal_targets,
             )
-            result = self._answer_from_docs(sub_task, original_query, analysis["context"])
+            result = self._answer_from_docs(sub_task, original_query, analysis["context"] + supplied)
             analysis["retrieval_trace"] = self.retrieval_trace
             result["causal_evidence"] = analysis
             return result
-        return self._answer_from_docs(sub_task, original_query, self.retrieve(sub_task))
+        docs = self.retrieve(sub_task) if engine_kind == "GRAPH_TRAVERSAL" else self.retrieve(sub_task, engine_kind=engine_kind)
+        return self._answer_from_docs(sub_task, original_query, docs + supplied)
 
-    def _answer_from_docs(self, sub_task: str, original_query: str, docs: str) -> Dict[str, Any]:
-        """
-        对子任务进行检索、抽取事实、推理，并判断信息是否充足。
-        现优先使用 Grader 结构化输出；若无法获得则回退原有逻辑。
-        """
+    def _answer_from_docs(self, sub_task, original_query, docs):
         if not docs:
-            return {
-                "fact": "未检索到相关文档",
-                "reasoning": "无法回答",
-                "sufficient": False,
-                "suggestion": f"请尝试更宽泛的检索词：{sub_task}",
-                "grader_status": "irrelevant"      # 新增字段
-            }
-
-        # 优先尝试 Grader 结构化评估
-        try:
-            grade_res = self.agentic_ops.grade_facts(sub_task, docs)
-            status = grade_res.get("status", "irrelevant")
-            facts = grade_res.get("extracted_facts", [])
-            suggestion = grade_res.get("missing_info", "")
-            rationale = grade_res.get("rationale", "")
-
-            if status == "sufficient":
-                return {
-                    "fact": "\n".join(facts),
-                    "reasoning": rationale,
-                    "sufficient": True,
-                    "suggestion": "",
-                    "grader_status": status
-                }
-            elif status == "partial":
-                return {
-                    "fact": "\n".join(facts),
-                    "reasoning": rationale,
-                    "sufficient": False,
-                    "suggestion": suggestion if suggestion else f"补充检索: {sub_task}",
-                    "grader_status": status
-                }
-            else:  # irrelevant
-                return {
-                    "fact": "未提取到相关事实",
-                    "reasoning": rationale,
-                    "sufficient": False,
-                    "suggestion": f"当前文档与任务无关，建议虫洞穿越: {sub_task}",
-                    "grader_status": status
-                }
-        except Exception as e:
-            if cfg.get("causal_evidence", "enabled", default=False):
-                raise
-            logger.warning(f"Grader 调用异常，回退旧逻辑: {e}")
-
-        # 回退原有逻辑 (保持兼容)
-        facts = self.agentic_ops.extract_facts(sub_task, docs, original_query=original_query)
-        reasoning = self.agentic_ops.reason(sub_task, facts)
-
-        sufficient = True
-        suggestion = ""
-        if "未找到相关事实" in facts or "无法确定" in reasoning:
-            sufficient = False
-            suggestion = f"当前文档未覆盖“{sub_task}”，建议检索更精准的法律条文。"
-        elif len(docs) < 50:
-            sufficient = False
-            suggestion = "检索到的文档过于简略，请尝试不同的查询表述。"
-
-        return {
-            "fact": facts,
-            "reasoning": reasoning,
-            "sufficient": sufficient,
-            "suggestion": suggestion,
-            "grader_status": "irrelevant" if not sufficient else "sufficient"
-        }
-
+            return {"fact": "未检索到相关文档", "reasoning": "无法回答", "sufficient": False,
+                    "suggestion": f"请尝试更宽泛的检索词：{sub_task}", "grader_status": "irrelevant"}
+        grade = self.agentic_ops.grade_facts(sub_task, docs)
+        return {"fact": "\n".join(grade.get("extracted_facts", [])),
+                "reasoning": grade.get("rationale", ""), "sufficient": grade["status"] == "sufficient",
+                "suggestion": grade.get("missing_info") or f"补充检索: {sub_task}",
+                "missing_info_kind": grade.get("missing_info_kind", "evidence"),
+                "grader_status": grade["status"]}

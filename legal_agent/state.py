@@ -17,7 +17,13 @@ class AgentState(TypedDict):
     sandbox_retries: int                                 # 沙箱重试次数
     needs_sandbox_calc: bool                             # 是否需要金额计算
     prediction_cutoff: Optional[str]                     # 可选：预测截止日（不使用系统当前时间猜测）
-    causal_targets: List[str]                            # 可选：图中明确的目标实体
+    causal_targets: Optional[List[str]]                  # 可选：图中明确的目标实体
     causal_evidence: Annotated[List[dict], operator.add]  # 可选：每任务因果证据审计
     citations: List[dict]                               # 可选：从已读原文校验的引用
-
+    completed_tasks: List[dict]
+    user_facts: List[str]
+    pending_question: Optional[str]
+    execution_status: str
+    calculation_ok: bool
+    calculation_mode: str
+    calculation_plan: dict

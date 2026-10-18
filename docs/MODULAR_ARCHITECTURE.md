@@ -11,6 +11,11 @@
 | `legal_agent/workflow.py` | LangGraph 拓扑与依赖注入 |
 | `legal_agent/routing.py` / `cache.py` | 意图路由与兼容的缓存包装 |
 | `agent_tools/sandbox/` | 代码执行与容器生命周期 |
+| `agent_tools/calculator.py` | 经过校验的 Decimal 四则运算计划 |
+| `agent_runtime/contracts.py` / `context.py` | 请求/任务契约、运行预算与工具上下文 |
+| `agent_runtime/store.py` / `checkpointer.py` | 租约、检查点、执行台账与待发送消息 |
+| `agent_runtime/service.py` | 统一执行、恢复、取消、回滚和备份 |
+| `agent_runtime/api.py` / `transport.py` / `worker.py` | HTTP 与 Kafka 适配 |
 | `dataset/` | 知识存储、文档结构、摘要与检索 |
 | `causal_evidence/` | 文本因果支持验证与时间权重 |
 | `benchmark_causal/` / `model/` | 独立的评测与训练；在线执行不启动训练 |
@@ -19,4 +24,5 @@
 新代码使用包导入；离线流程示例用 `python -m legal_agent.demo`。
 入口包装器只负责引导历史脚本，不在包内复制实现。
 
-验证：`python tools/ci.py`。模块移动阶段保持原执行行为，恢复、任务管理和工具隔离随后单独验收。
+当前运行、恢复与工具隔离契约见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。
+在 Windows 用 `tools/run.ps1 ci` 统一配置 D 盘临时目录和缓存，再执行现有工程检查。

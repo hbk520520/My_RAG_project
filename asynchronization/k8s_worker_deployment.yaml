@@ -1,3 +1,5 @@
+# Historical stage-worker example only. Default single-host runtime uses a shared local volume;
+# this multi-host sample does not provide it and is not the recommended deployment.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,6 +18,8 @@ spec:
       - name: retriever
         image: your-registry/legal-agent-worker:latest
         env:
+        - name: AGENT_RUNTIME
+          value: "0"
         - name: WORKER_TYPE
           value: "retriever"
         - name: REDIS_URL

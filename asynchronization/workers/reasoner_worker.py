@@ -64,7 +64,7 @@ def call_reasoner_llm(sub_task: str, extracted_facts: str) -> str:
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Reasoner LLM 调用失败: {e}")
-        return f"推理异常: {str(e)}"
+        raise
 
 
 def call_generator_llm(user_query: str, accumulated_context: list) -> str:
@@ -91,7 +91,7 @@ def call_generator_llm(user_query: str, accumulated_context: list) -> str:
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"Generator LLM 调用失败: {e}")
-        return f"报告生成异常: {str(e)}"
+        raise
 
 
 def detect_calculation_needed(user_query: str, reasoning_chain: list) -> bool:
@@ -238,6 +238,9 @@ def main():
                     user_query, reasoning_chain, state)
                 state["sandbox_session_id"] = sandbox_session
                 logger.info(f"Session {session_id}: 核算明细 = {calc_detail[:120]}")
+
+            if state.get("task_queue"):
+                raise ValueError("Cannot finalize a run with pending tasks")
 
             # ---- 生成最终报告 ----
             from dataset.citations import requires_citations, generate_cited_answer

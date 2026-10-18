@@ -8,8 +8,9 @@ from .state import AgentState
 from .operators import AgenticNodesOperator
 from .reasoning import Reasoner
 from .nodes import (node_l0_gateway, node_planner, node_executor, node_replanner, node_generate, node_write_code, node_execute_code, node_inject_calc_result, node_cleanup_sandbox)
+from .nodes import node_await_input
 def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperator,
-                            checkpointer=None):
+                            checkpointer=None, code_runner=None):
     """
     :param checkpointer: LangGraph checkpointer（P1 起用于"挂起等远端结果 + 跨进程恢复"）。
                          传 None 即纯内存运行，行为与之前完全一致。
@@ -23,26 +24,41 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
     def replanner(state): return node_replanner(state, agentic_ops)
     def generate(state): return node_generate(state, agentic_ops)
     def write_code(state): return node_write_code(state, agentic_ops)
-    def execute_code(state): return node_execute_code(state)
-    def inject_result(state): return node_inject_calc_result(state)
+    def execute_code(state): return node_execute_code(state, runner=code_runner)
+    def inject_result(state): return node_inject_calc_result(state, agentic_ops)
     def cleanup(state): return node_cleanup_sandbox(state)
 
+    from agent_runtime.context import current_run
+    def instrument(name, function):
+        def invoke(state):
+            context = current_run.get()
+            if context:
+                context.begin_node(name, state)
+            result = function(state)
+            if context:
+                context.check()
+            return result
+        return invoke
+
+
     # 节点注册
-    builder.add_node("L0_Gateway", l0_gateway)
-    builder.add_node("Planner", planner)
-    builder.add_node("Executor", executor)
-    builder.add_node("Replanner", replanner)
-    builder.add_node("Generate", generate)
-    builder.add_node("WriteCode", write_code)
-    builder.add_node("ExecuteCode", execute_code)
-    builder.add_node("InjectResult", inject_result)
-    builder.add_node("Cleanup", cleanup)
+    builder.add_node("L0_Gateway", instrument("L0_Gateway", l0_gateway))
+    builder.add_node("Planner", instrument("Planner", planner))
+    builder.add_node("Executor", instrument("Executor", executor))
+    builder.add_node("Replanner", instrument("Replanner", replanner))
+    builder.add_node("Generate", instrument("Generate", generate))
+    builder.add_node("WriteCode", instrument("WriteCode", write_code))
+    builder.add_node("ExecuteCode", instrument("ExecuteCode", execute_code))
+    builder.add_node("InjectResult", instrument("InjectResult", inject_result))
+    builder.add_node("Cleanup", instrument("Cleanup", cleanup))
+    builder.add_node("AwaitInput", instrument("AwaitInput", node_await_input))
 
     # 拓扑: L0 → Planner → Executor → Replanner
     builder.set_entry_point("L0_Gateway")
     builder.add_edge("L0_Gateway", "Planner")
     builder.add_edge("Planner", "Executor")
-    builder.add_edge("Executor", "Replanner")
+    builder.add_conditional_edges("Executor", lambda state: "AwaitInput" if state.get("pending_question") else "Replanner")
+    builder.add_edge("AwaitInput", "Executor")
 
     # Replanner 后根据队列和熔断状态决定去向
     def route_after_replan(state: AgentState):
@@ -86,4 +102,3 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
     builder.add_edge("Cleanup", END)
 
     return builder.compile(checkpointer=checkpointer)
-
