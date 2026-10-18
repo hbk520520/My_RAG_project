@@ -89,9 +89,12 @@ class VLLMPromptCacheEngine:
 
         # 选择 LoRA 适配器
         lora_request = None
-        if lora_name and lora_name in self.lora_modules:
+        if lora_name and lora_name not in self.lora_modules:
+            raise ValueError(f"Unconfigured LoRA adapter: {lora_name}")
+        if lora_name:
             from vllm.lora.request import LoRARequest
-            lora_request = LoRARequest(lora_name, 1, self.lora_modules[lora_name])
+            adapter_id = sorted(self.lora_modules).index(lora_name) + 1
+            lora_request = LoRARequest(lora_name, adapter_id, self.lora_modules[lora_name])
 
         # 调用 VLLM —— prefix caching 在这里自动生效
         outputs = self.engine.chat(

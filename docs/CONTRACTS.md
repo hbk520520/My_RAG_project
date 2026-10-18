@@ -1,4 +1,4 @@
-> 2026-10-18：当前持久执行权威是 agent_runtime；运行方法及限制见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。旧五阶段 topic 仅用于兼容排空。
+> 2026-10-18：当前持久执行权威是 agent_runtime；运行方法及限制见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。新增工具策略、分支隔离、并行/重放契约见 [PARALLEL_AGENT.md](PARALLEL_AGENT.md)。下列旧五阶段 topic 及“默认全部调用 CHAIN”的历史说明仅用于兼容入口；新运行时按任务策略调用工具。
 
 # 契约冻结（M0-T1）
 

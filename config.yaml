@@ -9,6 +9,7 @@ llm:
   base_url: "https://api.deepseek.com"
   judge_model: "deepseek-chat"
   backend: "api"               # api/auto use configured API; explicit vllm fails if unavailable
+  role_models: {}              # Optional API model overrides by role; same model by default.
   request_timeout: 30
   transport_retries: 1
   temperature_plan: 0.1
@@ -29,6 +30,13 @@ vllm:
     replanner: "./saved_loras/replanner_grpo"
     extractor: "./saved_loras/extractor_grader_dpo"
     reasoner: "./saved_loras/reasoner_sft"
+  role_adapters:
+    planner: "planner"
+    replanner: "replanner"
+    extractor: "extractor"
+    grader: "extractor"
+    verifier: "extractor"
+    reasoner: "reasoner"
 
 # --- 向量模型 ---
 embedding:
@@ -142,7 +150,17 @@ agent:
   max_retries_per_task: 2
   wormhole_threshold: 2      # 失败超过此次数触发虫洞
 
-# One host, one leased executor; API and Kafka share this authority.
+# One host; run leases and OS resource locks are shared by API and Kafka.
+scheduler:
+  max_parallel_tasks: 2
+  max_running_runs: 2
+  remote_model_slots: 4
+  local_model_slots: 1
+  encoder_slots: 1
+  tool_slots: 1
+  max_waiters: 64
+  model_cache_entries: 2
+  lock_path: ".runtime/resources"
 runtime:
   enabled: true
   path: ".runtime/runs.sqlite"

@@ -46,8 +46,8 @@ class UnifiedQueryRouter_Query:
         self.simple_confidence_floor = cfg.get(
             "router", "simple_confidence_floor", default=0.10)
 
-        logger.info(f"正在把嵌入模型和分类器加载进显存... (path={model_path}, device={device})")
-        self.embedder = SentenceTransformer(model_path, device=device)
+        self._embedding_spec = (model_path, device)
+        self._embedder = None
         self.classifier = LogisticRegression(class_weight='balanced')
 
         # L0 层：零成本正则 —— 闲聊、法条、简单句式直接拦截
@@ -61,7 +61,19 @@ class UnifiedQueryRouter_Query:
         )
 
         # 用几条手工标注的样本热一下分类器，后面靠真实数据持续更新
-        self._train_semantic_classifier()
+        if not cfg.get("runtime", "enabled", default=True):
+            self._train_semantic_classifier()
+
+    @property
+    def embedder(self):
+        if self._embedder is None:
+            path, device = self._embedding_spec
+            self._embedder = SentenceTransformer(path, device=device)
+        return self._embedder
+
+    @embedder.setter
+    def embedder(self, value):
+        self._embedder = value
 
     def _train_semantic_classifier(self):
         """给语义分类器喂几条种子样本，让它知道简单和复杂大概长什么样"""
@@ -130,6 +142,9 @@ class UnifiedQueryRouter_Query:
             "response": str      (仅闲聊时直接返回回复)
         }
         """
+        if cfg.get("runtime", "enabled", default=True):
+            from .gateway import classify
+            return {"intent": classify(query), "source": "SharedGateway"}
         query = query.strip()
         logger.info(f"📨 流量接入: '{query}'")
 
@@ -204,31 +219,41 @@ class UnifiedQueryRouter_Query:
     # ==========================================================
     def process(self, query: str, *, prediction_cutoff=None, causal_targets=None) -> Dict[str, Any]:
         result = self.route(query)
+        if cfg.get("runtime", "enabled", default=True):
+            from agent_runtime.service import AgentService
+            service = getattr(self, "_agent_service", None)
+            if service is None:
+                self._agent_service = service = AgentService()
+            row = service.submit({"query": query,
+                "project_id": cfg.get("long_term_memory", "project_id", default="legal-rag"),
+                "prediction_cutoff": prediction_cutoff, "causal_targets": causal_targets})
+            row = service.execute(row["run_id"])
+            final = row["result"] or {}
+            result.update(run_id=row["run_id"], run_status=row["status"],
+                          agent_report=final.get("final_report", ""),
+                          agent_observations=final.get("past_observations", []))
+            for source, target in (("causal_evidence", "agent_causal_evidence"), ("citations", "citations")):
+                if final.get(source):
+                    result[target] = final[source]
+            if row["status"] != "succeeded":
+                result["status"] = "agent_" + row["status"]
+            elif result["intent"] == "SIMPLE_QA":
+                result.update(status="simple_rag", response=final["final_report"],
+                              sufficient=not final.get("task_queue"))
+                if final.get("causal_evidence"):
+                    result["causal_evidence"] = final["causal_evidence"][0]
+            elif result["intent"] == "CHITCHAT":
+                result.update(status="chitchat", response=final["final_report"])
+            else:
+                result["status"] = "agent_execution"
+            if row["error"]:
+                result["agent_error"] = row["error"]
+            return result
         causal_mode = cfg.get("causal_evidence", "enabled", default=False)
         # 如果需要唤醒 Agent 图引擎，在这里根据 intent 进一步处理
         if result["intent"] == "COMPLEX_TASK" or (result["intent"] == "SIMPLE_QA" and causal_mode):
             logger.info("⏳ 执行知识检索与证据分析...")
             try:
-                if result["intent"] == "COMPLEX_TASK" and cfg.get("runtime", "enabled", default=True):
-                    from agent_runtime.service import AgentService
-                    service = getattr(self, "_agent_service", None)
-                    if service is None:
-                        self._agent_service = service = AgentService()
-                    row = service.submit({"query": query,
-                        "project_id": cfg.get("long_term_memory", "project_id", default="legal-rag"),
-                        "prediction_cutoff": prediction_cutoff, "causal_targets": causal_targets})
-                    row = service.execute(row["run_id"])
-                    final = row["result"] or {}
-                    result.update(run_id=row["run_id"], run_status=row["status"],
-                                  agent_report=final.get("final_report", ""),
-                                  agent_observations=final.get("past_observations", []))
-                    for source, target in (("causal_evidence", "agent_causal_evidence"), ("citations", "citations")):
-                        if final.get(source):
-                            result[target] = final[source]
-                    result["status"] = "agent_execution" if row["status"] == "succeeded" else "agent_" + row["status"]
-                    if row["error"]:
-                        result["agent_error"] = row["error"]
-                    return result
                 # 延迟导入，避免循环依赖
                 import sys, os
                 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "multiple-search"))

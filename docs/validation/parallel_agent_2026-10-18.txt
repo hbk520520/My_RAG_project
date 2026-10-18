@@ -1,0 +1,85 @@
+Parallel Agent validation — 2026-10-18
+
+Scope: composable evidence policy, bounded DAG parallelism, branch replay and host-local resource admission.
+No new dependencies, database migrations, Triton/CUDA kernels, deployment or successful real-model experiments.
+Original untracked dataset/Paper(now).code-workspace and dataset/project.code-workspace were not edited or staged.
+
+Executed checks:
+1. Focused tests:
+   .venv/Scripts/python.exe -B -m pytest tests/test_parallel_agent.py tests/test_runtime_store.py tests/test_causal_pipeline.py -q -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-parallel-final-focused --tb=short
+   Exit 0. See local outputs/parallel-final-focused.txt.
+2. Complete existing engineering pipeline:
+   tools/run.ps1 ci
+   Exit 0. All five categories pass; 560 tests collected, including 29 new parallel Agent cases.
+   Raw final pipeline output follows below.
+3. Test collection:
+   .venv/Scripts/python.exe -B -m pytest tests --collect-only -q -o cache_dir=outputs/pytest-cache
+   Exit 0. Total 560 (sum of per-module collection counts).
+4. Build:
+   .venv/Scripts/python.exe -B -m pip --disable-pip-version-check wheel . --no-deps --no-build-isolation --wheel-dir outputs/wheels --cache-dir outputs/pip-cache
+   Exit 0. legal_rag_agent-0.1.0-py3-none-any.whl
+   SHA256 fa99e4110a8d2876d0608a8a846ca0c23c165eef2069e54fb39b9ea706e5a3db
+   ZIP inspection confirms all five new runtime/domain modules are packaged.
+5. git diff --check: exit 0.
+
+Failure records and fixes:
+- Early noncausal provenance code unnecessarily invoked the CHAIN tokenizer; offline tests attempted to load its unavailable vocabulary. Original-record provenance now requires no tokenization. Offline navigation tests explicitly inject their tokenizer.
+- Historical simple-query fixtures patched the former entry point and entered the new default service. Marked historical fixtures explicitly runtime.enabled=false, and added real AgentService/router integration coverage for the new default.
+- Question answers initially did not reach dependent tasks. Scoped answers now propagate through declared dependencies, while independent unanswered tasks still ask separately.
+- Default task navigation=auto initially overrode deployment navigation=agent. Auto now follows deployment configuration.
+- Initial failed historical fixtures generated four failed synthetic runs and an empty project-memory database at default paths. Verified zero active runs and zero project_memory rows, then moved only those generated DB files and sidecars into outputs/parallel-initial-test-artifacts. No user knowledge data was removed.
+- Review found expired leases could revive and exceed the run quota; expired executors are now fenced and a regression test covers it.
+- Calibration identity now changes with extraction/verification model overrides, with regression coverage.
+Local failure logs remain in outputs/parallel-tests-first.txt and other outputs/parallel-*.txt files.
+
+Evidence boundaries:
+Tests use actual LangGraph, SQLite, HTTP TestClient and isolated subprocesses, including process exit after one branch result commits but before the coordinator checkpoint.
+Models, Kafka and Docker are substituted. No real GPU, provider-quality, live Kafka/Redis or Docker-build validation was performed.
+No independent lint/type-check configuration exists in the project; compileall is syntax verification, not a type check.
+The environment inherits global packages; wheel build is not a clean-environment installation proof.
+Execution is bounded batch/barrier parallelism; no preemption, strict fairness, distributed scheduling, byte-level VRAM allocator or cross-task GPU microbatching is claimed.
+CPU/JSON snapshot duplication remains for retrieval and recovery. Temporal filtering of final evidence is not proof that navigation summaries are free of historical information leakage.
+
+Raw final CI output:
+
+========================================================================
+  一键回归 —— 导入安全 + compileall + pytest + 离线 demo + P0 spike
+  解释器: D:\project(now)\.venv\Scripts\python.exe
+  工作目录: D:\project(now)
+========================================================================
+
+[1/5] 入口点导入安全性
+------------------------------------------------------------------------
+✅ audit: entrypoint imports  (10.5s)
+
+[2/5] 语法编译检查
+------------------------------------------------------------------------
+✅ compileall  (1.7s)
+
+[3/5] 测试套件
+------------------------------------------------------------------------
+✅ pytest  (44.9s)
+
+[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）
+------------------------------------------------------------------------
+✅ demo: 统一 Agent 运行时（持久化/等待输入/恢复/回滚）  [agent_runtime.demo]  (2.7s)
+✅ demo: 图引擎（BGE-M3 + FAISS + igraph）  [dataset/graph.py]  (0.4s)
+✅ demo: 记忆↔图 桥接（双写/脏同步/tombstone）  [dataset/memory_graph_bridge.py]  (2.2s)
+✅ demo: 增量记忆（GMM 动态阈值）  [dataset/IncrementalMemoryManager.py]  (2.0s)
+✅ demo: Agent 状态机（LangGraph 全图）  [multiple-search/soul.py]  (2.2s)
+✅ demo: 因果评测沙盘（合法语料 + SCM）  [benchmark_causal/run_demo.py]  (0.3s)
+✅ demo: 沙箱工具返回契约（成功/失败/清理）  [multiple-search/legal_sandbox/example_usage.py]  (0.4s)
+
+[5/5] P0 spike：LangGraph 检查点 / 跨进程恢复
+------------------------------------------------------------------------
+✅ spike: checkpoint & resume  (8.4s)
+
+汇总
+------------------------------------------------------------------------
+  ✅ 通过   entrypoint imports
+  ✅ 通过   compileall
+  ✅ 通过   pytest
+  ✅ 通过   offline demos
+  ✅ 通过   P0 spike
+
+结论：✅ 全绿

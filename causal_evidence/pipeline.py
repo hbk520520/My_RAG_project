@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import hashlib
 from pathlib import Path
 
 from pydantic import Field
@@ -56,7 +57,7 @@ def causal_completion(messages):
 
 
 def analyze_evidence(records: list[EvidenceRecord], question: str, call, *,
-                     settings: EvidenceSettings, extractor_id: str, encoding=None) -> dict:
+                     settings: EvidenceSettings, extractor_id: str, encoding=None, score=True) -> dict:
     calibrator = None
     if settings.calibration_path:
         path = Path(settings.calibration_path)
@@ -68,7 +69,9 @@ def analyze_evidence(records: list[EvidenceRecord], question: str, call, *,
     weighting = None
     status = "not_scored_without_cutoff"
     unresolved_targets = []
-    if settings.prediction_cutoff:
+    if settings.prediction_cutoff and not score:
+        status = "verification_only"
+    if settings.prediction_cutoff and score:
         # Conservative anchoring only. Explicit targets are preferred to inferred synonyms.
         targets = settings.targets
         if targets is None:
@@ -97,12 +100,12 @@ def analyze_evidence(records: list[EvidenceRecord], question: str, call, *,
         }, ensure_ascii=False)
     if not graph.source_chunks:
         status = "no_admitted_evidence"
-    return {"graph": serialized, "weighting": weighting, "weighting_status": status,
+    return {"graph": serialized, "weighting": weighting, "weighting_status": status, "extractor_id": extractor_id,
             "unresolved_targets": unresolved_targets, "context": context}
 
 
 def analyze_configured(records: list[EvidenceRecord], question: str, call=None, *,
-                       prediction_cutoff=None, targets=None) -> dict:
+                       prediction_cutoff=None, targets=None, weighting=True) -> dict:
     from config_loader import cfg
 
     values = dict(cfg.get("causal_evidence", default={}))
@@ -112,4 +115,18 @@ def analyze_configured(records: list[EvidenceRecord], question: str, call=None, 
         values["targets"] = targets
     settings = EvidenceSettings.model_validate(values)
     return analyze_evidence(records, question, call or causal_completion, settings=settings,
-                            extractor_id=cfg.get("llm", "judge_model") + ":causal-v1")
+                            extractor_id=extraction_identity(), score=weighting)
+
+
+def extraction_identity():
+    """Calibration must follow the extraction/verification model configuration."""
+    from config_loader import cfg
+    default = cfg.get("llm", "judge_model")
+    models = {role: cfg.get("llm", "role_models", role, default=default) for role in ("extractor", "verifier")}
+    if cfg.get("llm", "backend", default="api") != "vllm" and all(value == default for value in models.values()):
+        return default + ":causal-v1"
+    identity = {"models": models, "backend": cfg.get("llm", "backend", default="api")}
+    if identity["backend"] == "vllm":
+        identity["local"] = cfg.get("vllm")
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return "role-config:" + digest + ":causal-v1"

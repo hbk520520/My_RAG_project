@@ -13,7 +13,7 @@
 
 状态：`queued → running → waiting_input / succeeded / failed / cancelled / timed_out`。
 每次运行有独立 ID，任务保留 ID 和依赖；只有全部完成才生成成功结果。
-同一运行库同一时刻只允许一个租约有效的执行者，租约 30 秒、每 5 秒续期。
+同一运行只有一个有效拥有者；运行库按 scheduler.max_running_runs 限制同时运行数，租约 30 秒、每 5 秒续期。
 旧执行者的结果和检查点写入均受租约及 epoch 校验；取消或回滚后不能覆盖新状态。
 新执行者可以在旧租约失效后恢复，但单机硬件、磁盘及 SQLite 仍是可用性边界。
 
@@ -59,8 +59,10 @@ $env:DEEPSEEK_API_KEY = '<模型凭据>'
 
 安装后也可使用 `.venv\Scripts\legal-agent.exe`。推荐从本项目的可编辑安装运行。
 分发 wheel 时需通过 `MY_RAG_CONFIG` 指定保存在 D 盘的配置文件。
-查询路由的复杂任务默认进入该服务；返回原有报告/观察字段，同时增加 `run_id`、`run_status`。
-等待输入、失败及超时返回各自状态，不冒充成功。简单问答保留已有 CHAIN/PageIndex 入口。
+默认查询入口的闲聊、简单问答和复杂任务均进入该服务，使用共享前置路由与预算。
+保留报告/观察字段，并提供 run_id、run_status；等待输入、失败及超时明确返回各自状态。
+runtime.enabled=false 显式保留历史入口，供兼容使用，不具备新运行时保证。
+工具策略、并行批次、角色映射与模型拥有者的配置和边界见 [PARALLEL_AGENT.md](PARALLEL_AGENT.md)。
 
 完全离线的恢复示例：`python -m agent_runtime.demo`。它使用真实 SQLite 检查点与确定性工具，不使用模型、Kafka 或 Docker。
 
@@ -130,6 +132,6 @@ python -m agent_runtime --db 'D:\project(now)\outputs\restored-001\runs.sqlite' 
 统一入口：`python tools/ci.py`。新增测试覆盖真实 LangGraph、SQLite、HTTP TestClient 和隔离子进程；
 模型、Kafka 与 Docker 使用确定性替身。跨进程用例在工具结果落盘后、图检查点完成前执行 `os._exit(17)`，
 模拟进程消失，再恢复租约并检查工具只实际执行一次。
-最终完整套件通过 531 项测试，五类工程检查均通过；实际命令、输出及限制见
+此前运行时版本完整套件通过 531 项测试，五类工程检查均通过；历史命令、输出及限制见
 [验证记录](validation/agent_runtime_2026-10-18.txt)。
 没有真实模型质量评测、线上 Kafka/Redis 联机测试、Docker 构建或 GPU 验证；没有既定独立 lint/类型检查流程。

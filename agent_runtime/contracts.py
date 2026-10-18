@@ -54,22 +54,36 @@ class RunRequest(BaseModel):
             raise ValueError("query is blank")
         return value
 
-    @field_validator("prediction_cutoff")
+    @field_validator("prediction_cutoff", mode="before")
     @classmethod
     def valid_date(cls, value):
         if value is not None:
             from datetime import date
+            if isinstance(value, date):
+                value = value.isoformat()
+            if not isinstance(value, str):
+                raise ValueError("prediction_cutoff must be an ISO date")
             date.fromisoformat(value)
         return value
 
 
+class EvidencePolicy(BaseModel):
+    """Composable tools; none of these choices grants permission to invent evidence."""
+    model_config = ConfigDict(extra="forbid")
+    navigation: Literal["auto", "vector", "agent"] = "auto"
+    causal: Literal["auto", "off", "verify", "temporal"] = "auto"
+    analysis: Literal["facts", "reasoning"] = "facts"
+
+
 class TaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    task_id: str
+    task_id: str = Field(min_length=1)
     task_desc: str = Field(min_length=1)
     deps: list[str] = Field(default_factory=list)
     engine: Literal["GRAPH_TRAVERSAL", "GLOBAL_DENSE_WORMHOLE"] = "GRAPH_TRAVERSAL"
     rationale: str = ""
+    evidence: EvidencePolicy = Field(default_factory=EvidencePolicy)
+    revision: int = Field(default=0, ge=0)
 
 
 class Grade(BaseModel):

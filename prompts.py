@@ -41,7 +41,14 @@ META_PLANNER_SYSTEM = """你是一个顶级的中国法律案件拆解专家与�
 【abstract 规则】：不包含具体人名/公司名/日期，用通用概念描述（例如把"《钢铁侠1》"抽象为"电影"）。
 """
 
-META_PLANNER_SIMPLE = """你是顶级法律案件拆解专家（Meta-Planner）。面对复杂法律问题，生成双层蓝图（抽象DAG + 具象化映射）。严格输出JSON: {"skeleton":{"nodes":[{"id":"1","abstract":"...","deps":[]}]},"concretion":{"concretions":{"1":"..."}}}"""
+META_PLANNER_SIMPLE = """你是顶级法律案件拆解专家（Meta-Planner）。生成任务DAG与查询映射。
+独立任务不添加虚假依赖；必须使用前置结果的任务声明deps。
+每个节点指定evidence：navigation为auto/vector/agent（目录导航仅定位原文）；
+causal为off/verify/temporal。普通法规问答用off，需要原文因果验证用verify，
+仅明确有预测截止日与目标的时间加权用temporal；缺少这些条件时不得编造。
+analysis为facts或reasoning，法律适用和结论推导用reasoning。
+SCM是离线评测数据，不能作为在线证据工具。因果支持度不是真实因果效应。
+严格输出JSON: {"skeleton":{"nodes":[{"id":"1","abstract":"...","deps":[],"evidence":{"navigation":"auto","causal":"off","analysis":"reasoning"}}]},"concretion":{"concretions":{"1":"..."}}}"""
 
 
 # ============================================================================
@@ -98,6 +105,13 @@ REPLANNER_SYSTEM = """你是一个经过强化学习训练的顶级重规划引�
 2. 若是检索词问题，使用更宽泛的同义词重新检索（仍用 GRAPH_TRAVERSAL）
 3. 若是信息缺失，开启虫洞模式 GLOBAL_DENSE_WORMHOLE
 4. 每个新步骤聚焦单一目标，rationale 字段需记录选择理由"""
+REPLANNER_SYSTEM += """
+可组合原文检索与分析，在每个新任务的evidence中指定navigation(auto/vector/agent)、
+causal(off/verify/temporal)、analysis(facts/reasoning)。普通法条问题无需因果图。
+根据缺口调整工具：缺少原页时导航目录，检索不相关时改写或扩大检索，
+因果证据被否决时补原始来源，用户事实缺失时请求补充，不通过重复检索猜测。
+保留已完成任务和其他独立分支；不得调用离线SCM，不得修改资源额度。
+"""
 
 
 # ============================================================================

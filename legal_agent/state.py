@@ -2,6 +2,7 @@ from __future__ import annotations
 import operator
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 class AgentState(TypedDict):
+    intent: str
     user_query: str
     task_queue: List[str]                               # 当前任务队列（保留原字段）
     past_observations: Annotated[List[str], operator.add]  # 历史观察（追加）
@@ -27,3 +28,8 @@ class AgentState(TypedDict):
     calculation_ok: bool
     calculation_mode: str
     calculation_plan: dict
+    task_retry_contexts: Dict[str, dict]
+    task_results: Dict[str, dict]
+    pending_task_id: Optional[str]
+    source_evidence: Annotated[List[dict], operator.add]
+    task_user_facts: Dict[str, List[str]]

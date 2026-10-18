@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
@@ -16,7 +17,7 @@ from pydantic import ValidationError
 
 from config_loader import cfg
 from .context import RunContext, current_run
-from .contracts import BudgetExceeded, OutcomeUnknown, ROOT, RunRequest, RunStatus, RunStopped
+from .contracts import BudgetExceeded, OutcomeUnknown, ROOT, RunConflict, RunRequest, RunStatus, RunStopped
 from .store import RunStore, dumps
 
 
@@ -30,7 +31,7 @@ class AgentService:
             operator_factory = AgenticNodesOperator
         self.operator_factory = operator_factory
         self.workflow_factory = workflow_factory
-        self._encoders = {}
+        self._operator_lock = threading.Lock()
         self._operator = None
 
     def submit(self, request, *, transport="local"):
@@ -53,7 +54,7 @@ class AgentService:
         from dataset.long_term_memory import graph_snapshot, restore_graph
         engine = self.engine_factory(row["project_id"])
         pin = self.store.pin(row["run_id"], row["epoch"])
-        policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox")}
+        policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox", "scheduler", "vllm")}
         policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
         config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
         import prompts
@@ -72,6 +73,7 @@ class AgentService:
 
     @contextmanager
     def _workflow(self, row, *, inspection=False):
+        from legal_agent.gateway import classify
         connection = sqlite3.connect(self.checkpoint_path, check_same_thread=False, timeout=10)
         try:
             from .checkpointer import FencedSqliteSaver
@@ -79,24 +81,24 @@ class AgentService:
             saver = FencedSqliteSaver(connection, context) if context else SqliteSaver(connection)
             if self.workflow_factory:
                 graph = self.workflow_factory(saver)
-            elif inspection:
+            elif inspection or classify(row["request"]["query"]) == "CHITCHAT":
                 from legal_agent.workflow import build_plan_replan_agent
                 graph = build_plan_replan_agent(None, None, checkpointer=saver)
             else:
                 from legal_agent.reasoning import Reasoner
                 from legal_agent.workflow import build_plan_replan_agent
                 engine = self._pinned_engine(row)
-                cached = self._encoders.get(row["project_id"])
-                if cached is not None:
-                    engine.set_encoder(cached)
-                if self._operator is None:
-                    self._operator = self.operator_factory()
+                from .models import shared_encoder
+                from dataset.document_store import DocumentReader
+                engine.set_encoder(shared_encoder(engine))
+                engine._document_reader = DocumentReader.from_engine(engine)
+                with self._operator_lock:
+                    if self._operator is None:
+                        self._operator = self.operator_factory()
                 ops = self._operator
                 reasoner = Reasoner(engine, lambda text: engine.encode_text(text)["dense"], ops)
                 graph = build_plan_replan_agent(reasoner, ops, checkpointer=saver)
             yield graph
-            if not inspection and not self.workflow_factory and engine._encoder is not None:
-                self._encoders[row["project_id"]] = engine._encoder
         finally:
             connection.close()
 
@@ -109,8 +111,10 @@ class AgentService:
         return config
 
     def execute(self, run_id, *, epoch=None):
+        from .resources import settings
         token = self.store.claim(run_id, epoch=epoch,
-                                 result_topic=cfg.get("runtime", "result_topic", default="topic.agent.result"))
+                                 result_topic=cfg.get("runtime", "result_topic", default="topic.agent.result"),
+                                 max_running=settings().max_running_runs)
         if token is None:
             return self.store.get(run_id)
         row = self.store.get(run_id)
@@ -172,6 +176,8 @@ class AgentService:
                 status, kind = RunStatus.TIMED_OUT, "budget"
             elif isinstance(exc, OutcomeUnknown):
                 status, kind = RunStatus.FAILED, "outcome_unknown"
+            elif isinstance(exc, RunConflict):
+                status, kind = RunStatus.FAILED, "resource"
             elif isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError, ConnectionError)):
                 status, kind = RunStatus.FAILED, "transport"
             elif isinstance(exc, (ValidationError, ValueError, json.JSONDecodeError)):
@@ -216,8 +222,13 @@ class AgentService:
         return self.store.rewind(run_id, checkpoint, topic=topic)
 
     def recover(self):
+        from .resources import settings
         self.store.expire_waiting(cfg.get("runtime", "result_topic", default="topic.agent.result"))
-        return [self.execute(run_id) for run_id in self.store.recoverable()]
+        pending = self.store.recoverable()[:settings().max_running_runs]
+        if not pending:
+            return []
+        with ThreadPoolExecutor(max_workers=len(pending), thread_name_prefix="agent-run") as pool:
+            return list(pool.map(self.execute, pending))
 
     def backup(self, destination):
         """Publish a manifest only after both runtime databases pass integrity checks."""

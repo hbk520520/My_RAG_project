@@ -63,6 +63,8 @@ def make_ops():
 
 
 def query_router(monkeypatch, sources, ops):
+    # Explicit historical route; durable entry points are covered separately.
+    monkeypatch.setitem(cfg._data["runtime"], "enabled", False)
     import soul
     from query import UnifiedQueryRouter_Query
     monkeypatch.setattr(soul.LegalDenseGraphBuilder, "from_config", lambda: sources)
@@ -124,6 +126,7 @@ def test_default_grading_failure_is_not_replaced_with_ungraded_facts(monkeypatch
 def test_disabled_simple_query_preserves_original_route_only_behavior(monkeypatch):
     from query import UnifiedQueryRouter_Query
     monkeypatch.setitem(cfg._data, "causal_evidence", {"enabled": False})
+    monkeypatch.setitem(cfg._data["runtime"], "enabled", False)
     router = UnifiedQueryRouter_Query.__new__(UnifiedQueryRouter_Query)
     router.route = lambda query: {"intent": "SIMPLE_QA"}
     assert router.process("question") == {"intent": "SIMPLE_QA", "status": "simple_rag"}

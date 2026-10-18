@@ -17,6 +17,22 @@ class Reasoner:
         self.embedding_fn = embedding_fn
         self.agentic_ops = agentic_ops
         self.retrieval_trace = None
+        self.evidence_policy = None
+        self.dependency_facts = []
+
+    def fork(self, policy, dependency_facts):
+        from copy import copy
+        from agent_runtime.contracts import EvidencePolicy
+        worker = copy(self)
+        worker.retrieval_trace = None
+        worker.evidence_policy = EvidencePolicy.model_validate(policy)
+        worker.dependency_facts = dependency_facts
+        return worker
+
+    def _model_messages(self, role, messages):
+        from .llm import model_role
+        with model_role(role):
+            return self.agentic_ops._call_messages(messages, require_json=True, temperature=0)
 
     def retrieve(self, query: str, *, engine_kind="GRAPH_TRAVERSAL") -> str:
         """从法律图谱检索相关文档，返回合并后的文本"""
@@ -32,20 +48,27 @@ class Reasoner:
         def read():
             hits = self._read_hits(query, engine_kind)
             return {"hits": hits, "trace": self.retrieval_trace}
-        result = tool_call("retrieval", {"query": query, "engine": engine_kind}, read)
+        result = tool_call("retrieval", {"query": query, "engine": engine_kind,
+                           "policy": self.evidence_policy.model_dump() if self.evidence_policy else None}, read)
         self.retrieval_trace = result["trace"]
         return result["hits"]
 
     def _read_hits(self, query, engine_kind):
-        from dataset.document_navigation import retrieve
+        from dataset.document_navigation import retrieve, NavigationSettings
         self.retrieval_trace = None
         if not self.legal_graph:
             return []
         from agent_runtime.context import current_run
         if current_run.get() is None:
             self.legal_graph.refresh_memory()
+        settings = NavigationSettings.model_validate(cfg.get("pageindex", default={}))
+        if self.evidence_policy:
+            if self.evidence_policy.navigation == "agent" and not settings.enabled:
+                raise ValueError("Document navigation is disabled by deployment policy")
+            if self.evidence_policy.navigation != "auto":
+                settings = settings.model_copy(update={"navigation": self.evidence_policy.navigation})
         result = retrieve(self.legal_graph, query, lambda: self._vector_hits(query, engine_kind),
-                          lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0))
+                          lambda messages: self._model_messages("navigator", messages), settings=settings)
         self.retrieval_trace = result.trace
         return result.hits
 
@@ -85,28 +108,65 @@ class Reasoner:
     def answer(self, sub_task: str, original_query: str, *, prediction_cutoff=None,
                causal_targets=None, engine_kind="GRAPH_TRAVERSAL", user_facts=None) -> Dict[str, Any]:
         supplied = "\nUser-supplied case facts (not legal source evidence):\n" + "\n".join(user_facts) if user_facts else ""
-        if cfg.get("causal_evidence", "enabled", default=False):
+        if self.dependency_facts:
+            supplied += "\nVerified predecessor task facts:\n" + "\n".join(fact for facts in self.dependency_facts for fact in facts)
+        causal = cfg.get("causal_evidence", "enabled", default=False)
+        if self.evidence_policy:
+            mode = self.evidence_policy.causal
+            if mode in ("verify", "temporal") and not causal:
+                raise ValueError("Causal evidence is disabled by deployment policy")
+            if mode == "temporal" and (not prediction_cutoff or not causal_targets):
+                raise ValueError("Temporal weighting requires an explicit cutoff and target entities")
+            if mode == "auto":
+                import re
+                causal = causal and (bool(prediction_cutoff and causal_targets) or bool(re.search(
+                    r"因果|导致|造成|因为什么|为何|原因|影响|预测|caus(?:e|al)|forecast|prevent|enable", sub_task + " " + original_query, re.I)))
+            else:
+                causal = causal and mode != "off"
+        if causal:
             from causal_evidence.pipeline import analyze_configured
             analysis = analyze_configured(
                 (self.retrieve_records(sub_task) if engine_kind == "GRAPH_TRAVERSAL" else
                  self.retrieve_records(sub_task, engine_kind=engine_kind)), original_query,
-                lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0),
+                lambda messages: self._model_messages(
+                    "verifier" if messages[0]["content"].startswith("Causal Verification:") else "extractor",
+                    messages),
                 prediction_cutoff=prediction_cutoff, targets=causal_targets,
+                weighting=not self.evidence_policy or self.evidence_policy.causal != "verify",
             )
             result = self._answer_from_docs(sub_task, original_query, analysis["context"] + supplied)
             analysis["retrieval_trace"] = self.retrieval_trace
             result["causal_evidence"] = analysis
             return result
-        docs = self.retrieve(sub_task) if engine_kind == "GRAPH_TRAVERSAL" else self.retrieve(sub_task, engine_kind=engine_kind)
-        return self._answer_from_docs(sub_task, original_query, docs + supplied)
+        if self.evidence_policy is None:
+            docs = self.retrieve(sub_task) if engine_kind == "GRAPH_TRAVERSAL" else self.retrieve(sub_task, engine_kind=engine_kind)
+            return self._answer_from_docs(sub_task, original_query, docs + supplied)
+        records = self.retrieve_records(sub_task, engine_kind=engine_kind)
+        if prediction_cutoff:
+            from datetime import date
+            from causal_evidence.chunking import admissible, parse_timestamp
+            cutoff = date.fromisoformat(prediction_cutoff) if isinstance(prediction_cutoff, str) else prediction_cutoff
+            records = [record.model_copy(update={"timestamp": record.timestamp or parse_timestamp(record.text)}) for record in records]
+            records = [record for record in records if admissible(record, cutoff)]
+        from .evidence import source_audit
+        audit = source_audit(records, self.retrieval_trace)
+        docs = audit["context"] if records else ""
+        result = self._answer_from_docs(sub_task, original_query, docs + supplied)
+        result["source_evidence"] = audit
+        return result
 
     def _answer_from_docs(self, sub_task, original_query, docs):
         if not docs:
             return {"fact": "未检索到相关文档", "reasoning": "无法回答", "sufficient": False,
                     "suggestion": f"请尝试更宽泛的检索词：{sub_task}", "grader_status": "irrelevant"}
         grade = self.agentic_ops.grade_facts(sub_task, docs)
-        return {"fact": "\n".join(grade.get("extracted_facts", [])),
-                "reasoning": grade.get("rationale", ""), "sufficient": grade["status"] == "sufficient",
+        facts = "\n".join(grade.get("extracted_facts", []))
+        reasoning = ""
+        if self.evidence_policy and self.evidence_policy.analysis == "reasoning" and grade["status"] == "sufficient":
+            reasoning = self.agentic_ops.reason(sub_task, docs + "\nVerified facts:\n" + facts)
+        return {"fact": facts,
+                "reasoning": reasoning, "sufficient": grade["status"] == "sufficient",
+                "grading_rationale": grade.get("rationale", ""),
                 "suggestion": grade.get("missing_info") or f"补充检索: {sub_task}",
                 "missing_info_kind": grade.get("missing_info_kind", "evidence"),
                 "grader_status": grade["status"]}

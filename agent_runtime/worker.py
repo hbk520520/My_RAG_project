@@ -10,6 +10,7 @@ def main():
     from kafka import KafkaConsumer
     import json
     import logging
+    import sqlite3
     from observability import setup_structured_logging
     from .service import AgentService
     from .transport import KafkaTransport
@@ -22,23 +23,34 @@ def main():
         cfg.get("runtime", "pending_topic"), bootstrap_servers=cfg.get("kafka", "bootstrap_servers"),
         group_id="agent-runtime-v1", enable_auto_commit=False, max_poll_records=1,
         max_poll_interval_ms=900000, auto_offset_reset="earliest",
-        value_deserializer=lambda raw: json.loads(raw.decode("utf-8")))
+        value_deserializer=None)
     producer = create_producer(bootstrap_servers=cfg.get("kafka", "bootstrap_servers"))
     service = AgentService()
     transport = KafkaTransport(service, producer)
+    def execute():
+        while not stop.wait(0.2):
+            try:
+                service.recover()
+            except sqlite3.Error:
+                logger.exception("Run storage unavailable; queued work remains durable")
+    worker = threading.Thread(target=execute, name="agent-kafka-executor", daemon=True)
+    worker.start()
     try:
         while not stop.is_set():
-            service.recover()
+            if not worker.is_alive():
+                raise RuntimeError("Agent executor stopped")
             transport.dispatch()
             for messages in consumer.poll(timeout_ms=1000, max_records=1).values():
                 for message in messages:
                     try:
-                        transport.receive(message.value)
+                        transport.accept(json.loads(message.value.decode("utf-8")))
                     except (KeyError, ValueError) as exc:
                         # Durable quarantine must succeed before committing the offset.
                         quarantine_message(message, exc, logger)
                     consumer.commit()
     finally:
+        stop.set()
+        worker.join(timeout=1)
         consumer.close()
         producer.close()
 

@@ -5,11 +5,13 @@
 当前实现：共享 LangGraph 流程、SQLite 任务与检查点、等待用户补充/恢复/取消/回滚、
 Kafka 作业适配、Decimal 计算与可选 Docker 代码工具。
 知识侧保留 FAISS/igraph、项目知识快照、PageIndex 思路的文档导航，以及 CHAIN 文本因果支持验证。
+任务支持按证据需求组合工具、有界 DAG 并行、分支结果重放和可配置资源准入。
 
 ## 从这里开始
 
 - [模块职责](docs/MODULAR_ARCHITECTURE.md)
 - [Agent 运行、配置、恢复及边界](docs/AGENT_RUNTIME.md)
+- [工具策略、并行和共享资源](docs/PARALLEL_AGENT.md)
 - [接口契约](docs/CONTRACTS.md)
 - [知识长期记忆](docs/LONG_TERM_MEMORY.md)
 - [PageIndex 已实现能力](docs/PAGEINDEX_IMPLEMENTATION.md)

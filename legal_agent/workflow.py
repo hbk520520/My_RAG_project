@@ -20,8 +20,9 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
     # 闭包注入依赖
     def l0_gateway(state): return node_l0_gateway(state)
     def planner(state): return node_planner(state, agentic_ops)
-    def executor(state): return node_executor(state, reasoner)
-    def replanner(state): return node_replanner(state, agentic_ops)
+    from .scheduling import execute_ready, replan_pending
+    def executor(state): return execute_ready(state, reasoner)
+    def replanner(state): return replan_pending(state, agentic_ops)
     def generate(state): return node_generate(state, agentic_ops)
     def write_code(state): return node_write_code(state, agentic_ops)
     def execute_code(state): return node_execute_code(state, runner=code_runner)
@@ -55,7 +56,7 @@ def build_plan_replan_agent(reasoner: Reasoner, agentic_ops: AgenticNodesOperato
 
     # 拓扑: L0 → Planner → Executor → Replanner
     builder.set_entry_point("L0_Gateway")
-    builder.add_edge("L0_Gateway", "Planner")
+    builder.add_conditional_edges("L0_Gateway", lambda state: "Generate" if state.get("intent") == "CHITCHAT" else "Planner")
     builder.add_edge("Planner", "Executor")
     builder.add_conditional_edges("Executor", lambda state: "AwaitInput" if state.get("pending_question") else "Replanner")
     builder.add_edge("AwaitInput", "Executor")

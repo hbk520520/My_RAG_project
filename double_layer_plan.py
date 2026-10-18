@@ -9,6 +9,7 @@ C_q 把抽象的节点映射到当前案件的具体查询。
 """
 from typing import List, Dict, Optional, Set
 from pydantic import BaseModel, Field, field_validator
+from agent_runtime.contracts import EvidencePolicy
 
 # 阶段 10：原先用的是 Pydantic V1 风格的 `@validator`，V2 起已废弃、V3 将移除。
 # 现已迁移到 `@field_validator`（默认 mode="after"，与 V1 的校验时机一致，
@@ -20,6 +21,7 @@ class DAGNode(BaseModel):
     id: str = Field(..., description="节点编号")
     abstract: str = Field(..., description="抽象任务，不提具体人名公司名")
     deps: List[str] = Field(default_factory=list, description="依赖的前置节点 id")
+    evidence: EvidencePolicy = Field(default_factory=EvidencePolicy)
 
 
 class SkeletonGraph(BaseModel):
@@ -31,6 +33,8 @@ class SkeletonGraph(BaseModel):
     def validate_dag(cls, nodes: List[DAGNode]) -> List[DAGNode]:
         """验证无环 + 依赖节点存在"""
         node_ids = {n.id for n in nodes}
+        if len(node_ids) != len(nodes):
+            raise ValueError("DAG node IDs must be unique")
         for node in nodes:
             for dep in node.deps:
                 if dep not in node_ids:
@@ -152,7 +156,8 @@ def parse_double_layer_plan(raw_json: dict) -> DoubleLayerPlan:
                 desc = t.get("task_desc", str(t))
             else:
                 desc = str(t)
-            nodes.append(DAGNode(id=nid, abstract=desc[:30], deps=[]))
+            nodes.append(DAGNode(id=nid, abstract=desc[:30], deps=[],
+                                 evidence=t.get("evidence", {}) if isinstance(t, dict) else {}))
             concretions[nid] = desc
         return DoubleLayerPlan(
             skeleton=SkeletonGraph(nodes=nodes),

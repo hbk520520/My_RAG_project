@@ -9,12 +9,15 @@
 | `legal_agent/state.py` | 图状态 |
 | `legal_agent/nodes.py` | 状态转换节点 |
 | `legal_agent/workflow.py` | LangGraph 拓扑与依赖注入 |
+| `legal_agent/scheduling.py` | DAG 就绪任务、有界分支执行、结果合并和局部重规划 |
+| `legal_agent/gateway.py` / `evidence.py` | 统一前置分类、独立于因果分析的原文来源记录 |
 | `legal_agent/routing.py` / `cache.py` | 意图路由与兼容的缓存包装 |
 | `agent_tools/sandbox/` | 代码执行与容器生命周期 |
 | `agent_tools/calculator.py` | 经过校验的 Decimal 四则运算计划 |
 | `agent_runtime/contracts.py` / `context.py` | 请求/任务契约、运行预算与工具上下文 |
 | `agent_runtime/store.py` / `checkpointer.py` | 租约、检查点、执行台账与待发送消息 |
 | `agent_runtime/service.py` | 统一执行、恢复、取消、回滚和备份 |
+| `agent_runtime/resources.py` / `models.py` | 同机资源准入、加速器模型拥有者及共享编码器 |
 | `agent_runtime/api.py` / `transport.py` / `worker.py` | HTTP 与 Kafka 适配 |
 | `dataset/` | 知识存储、文档结构、摘要与检索 |
 | `causal_evidence/` | 文本因果支持验证与时间权重 |

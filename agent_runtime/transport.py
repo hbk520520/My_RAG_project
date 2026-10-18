@@ -30,3 +30,10 @@ class KafkaTransport:
     def receive(self, value):
         event = Envelope.model_validate(value)
         return self.service.execute(event.run_id, epoch=event.epoch)
+
+    def accept(self, value):
+        """Acknowledge durable delivery without blocking Kafka polling on a run."""
+        event = Envelope.model_validate(value)
+        row = self.service.store.get(event.run_id)
+        # Old epochs are harmless duplicate deliveries, not a new submission.
+        return row

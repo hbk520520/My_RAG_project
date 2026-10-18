@@ -6,6 +6,7 @@ logger = logging.getLogger("LegalAgentPlanReplan")
 from .state import AgentState
 from .operators import AgenticNodesOperator
 from .reasoning import Reasoner
+from .gateway import classify
 from replanner_rules import apply_hard_rules
 from agent_tools.sandbox.executor import run_code_once, destroy_session as destroy_sandbox_session
 def node_l0_gateway(state: AgentState) -> dict:
@@ -29,6 +30,7 @@ def node_l0_gateway(state: AgentState) -> dict:
             raise ValueError(f"L0_REJECT: 触发安全熔断 - 检测到注入模式")
 
     return {
+        "intent": classify(query),
         "recursion_depth": 0,
         "retry_context": {},
         "global_facts": state.get("global_facts", [])
@@ -43,8 +45,13 @@ def node_planner(state: AgentState, agentic_ops: "AgenticNodesOperator") -> dict
     LLM 客户端。原先这里调模块级 call_deepseek_planner()，等于存在第二份
     Planner 实现，而且它自带一个独立客户端，测试桩无法替换。
     """
+    if state.get("intent") == "SIMPLE_QA":
+        from agent_runtime.contracts import TaskSpec, EvidencePolicy
+        task = TaskSpec(task_id="direct", task_desc=state["user_query"], evidence=EvidencePolicy(causal="off"))
+        return {"task_queue": [task.model_dump()]}
     logger.info("Planner 启动，生成执行计划")
-    queue = agentic_ops.generate_plan(state["user_query"])
+    inputs = {key: state[key] for key in ("prediction_cutoff", "causal_targets") if state.get(key) is not None}
+    queue = agentic_ops.generate_plan(state["user_query"], **inputs)
     from agent_runtime.contracts import TaskSpec
     queue = [TaskSpec.model_validate({"task_id": f"task-{index}", **task}).model_dump()
              if isinstance(task, dict) else TaskSpec(task_id=f"task-{index}", task_desc=task).model_dump()
@@ -153,6 +160,8 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
                                                 else {"task_desc": actual_query}]
     if "causal_evidence" in result:
         delta["causal_evidence"] = [result["causal_evidence"]]
+    if "source_evidence" in result:
+        delta["source_evidence"] = [result["source_evidence"]]
     return delta
 
 
@@ -177,7 +186,8 @@ def node_replanner(state: AgentState,
         return {"task_queue": []}
 
     # 情况2：无头绪或部分缺失且重试超过阈值 -> LLM 虫洞重规划
-    if status == "irrelevant" or (status == "partial" and fail_count > 2):
+    threshold = cfg.get("agent", "wormhole_threshold", default=2)
+    if status == "irrelevant" or (status == "partial" and fail_count > threshold):
         logger.info("触发虫洞重规划引擎 (LLM)")
 
         current_failed = queue[0]
@@ -208,7 +218,7 @@ def node_replanner(state: AgentState,
         for index, task in enumerate(new_tasks):
             task["task_id"] = (original.get("task_id", f"task-{state.get('recursion_depth', 0)}")
                                if index == len(new_tasks) - 1 else
-                               f"replan-{state.get('recursion_depth', 0)}-{index}")
+                               f"replan-{original.get('task_id', 'task')}-{original.get('revision', 0)}-{index}")
             task["deps"] = original.get("deps", []) if index == 0 else [new_tasks[index-1]["task_id"]]
         new_queue = new_tasks + queue[1:]
     else:
@@ -222,10 +232,13 @@ def node_replanner(state: AgentState,
             new_queue = hard_tasks + new_queue
 
     return {"task_queue": new_queue, "retry_context": {} if status == "sufficient" or
-            status == "irrelevant" or (status == "partial" and fail_count > 2) else retry_ctx}
+            status == "irrelevant" or (status == "partial" and fail_count > threshold) else retry_ctx}
 
 
 def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
+    if state.get("intent") == "CHITCHAT":
+        from .gateway import GREETING_REPLY
+        return {"final_report": GREETING_REPLY}
     if state.get("calculation_mode") == "structured" and any(
             word in state["user_query"] for word in ("赔偿", "补偿", "加班费", "工资", "双倍", "2N", "N+1", "金额", "元")):
         return {"needs_sandbox_calc": True, "sandbox_retries": 0, "final_report": ""}
@@ -238,7 +251,7 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
             "reasoning": obs
         })
     from dataset.citations import requires_citations, generate_cited_answer
-    analyses = state.get("causal_evidence", [])
+    analyses = state.get("causal_evidence", []) + state.get("source_evidence", [])
     citations = None
     if requires_citations(analyses):
         cited = generate_cited_answer(prompts.build_generator_messages(state["user_query"], accumulated), analyses,
@@ -311,7 +324,9 @@ def node_execute_code(state: AgentState, runner=None) -> dict:
     if not code:
         return {"retry_context": {"sandbox_error": "无代码可执行"}}
 
-    outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
+    from agent_runtime.resources import resource, settings
+    with resource("tool.sandbox", settings().tool_slots):
+        outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
 
     if outcome["error"]:
         logger.warning(f"沙箱执行报错（via={outcome['via']}）: {outcome['error']}")
@@ -382,5 +397,9 @@ def node_await_input(state):
     answer = interrupt({"question": state["pending_question"]})
     if not isinstance(answer, str) or not answer.strip() or len(answer) > 20000:
         raise ValueError("Resume requires a nonempty answer of at most 20000 characters")
-    return {"user_facts": state.get("user_facts", []) + [answer.strip()],
+    scoped = dict(state.get("task_user_facts", {}))
+    task_id = state.get("pending_task_id")
+    if task_id:
+        scoped[task_id] = scoped.get(task_id, []) + [answer.strip()]
+    return {"user_facts": state.get("user_facts", []) + [answer.strip()], "task_user_facts": scoped,
             "pending_question": None, "execution_status": "running"}

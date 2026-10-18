@@ -102,7 +102,9 @@ class RunStore:
                 "SELECT run_id,status,epoch,created,updated,error_kind FROM runs WHERE project_id=? ORDER BY created DESC LIMIT ?",
                 (project_id, limit))]
 
-    def claim(self, run_id, *, epoch=None, lease_seconds=30, result_topic="topic.agent.result"):
+    def claim(self, run_id, *, epoch=None, lease_seconds=30, result_topic="topic.agent.result", max_running=1):
+        if max_running < 1:
+            raise ValueError("max_running must be positive")
         now = time.time()
         token = uuid.uuid4().hex
         with self.connection() as db:
@@ -116,8 +118,8 @@ class RunStore:
                 return None
             if row["status"] == RunStatus.RUNNING and (row["lease_until"] or 0) > now:
                 return None
-            if db.execute("SELECT 1 FROM runs WHERE run_id<>? AND status=? AND lease_until>? LIMIT 1",
-                          (run_id, RunStatus.RUNNING, now)).fetchone():
+            if db.execute("SELECT count(*) FROM runs WHERE run_id<>? AND status=? AND lease_until>?",
+                          (run_id, RunStatus.RUNNING, now)).fetchone()[0] >= max_running:
                 return None
             if row["deadline"] <= now:
                 db.execute("UPDATE runs SET status=?,error_kind='deadline',updated=? WHERE run_id=?",
@@ -137,6 +139,8 @@ class RunStore:
             raise RunStopped("Run is no longer owned by this executor")
         if row["deadline"] <= time.time():
             raise BudgetExceeded("Run deadline exceeded")
+        if (row["lease_until"] or 0) <= time.time():
+            raise RunStopped("Executor lease has expired")
         return row
 
     def heartbeat(self, run_id, epoch, token, lease_seconds=30):
@@ -172,7 +176,8 @@ class RunStore:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-            if row["epoch"] != epoch or row["status"] != RunStatus.RUNNING or row["lease_token"] != token:
+            if (row["epoch"] != epoch or row["status"] != RunStatus.RUNNING or row["lease_token"] != token
+                    or (row["lease_until"] or 0) <= time.time()):
                 return False
             db.execute("UPDATE runs SET status=?,result=?,error=?,error_kind=?,lease_token=NULL,lease_until=NULL,updated=? WHERE run_id=?",
                        (status, dumps(result) if result is not None else None, error, error_kind, time.time(), run_id))
@@ -249,7 +254,7 @@ class RunStore:
     def recoverable(self):
         with self.connection() as db:
             return [r[0] for r in db.execute(
-                "SELECT run_id FROM runs WHERE status=? OR (status=? AND lease_until<?)",
+                "SELECT run_id FROM runs WHERE status=? OR (status=? AND lease_until<?) ORDER BY created,run_id",
                 (RunStatus.QUEUED, RunStatus.RUNNING, time.time()))]
 
     def expire_waiting(self, result_topic="topic.agent.result"):

@@ -53,7 +53,7 @@ def retrieve(engine, query: str, vector_search, call, *, settings=None, encoding
              "read_records": 0, "model_calls": 0}
     if not settings.enabled or settings.navigation == "vector":
         return NavigationResult(vector_search(), trace)
-    reader = DocumentReader.from_engine(engine)
+    reader = getattr(engine, "_document_reader", None) or DocumentReader.from_engine(engine)
     documents = [document for document in reader.list_documents() if document["version"]]
     if not documents:
         return NavigationResult(vector_search(), trace)

@@ -192,7 +192,8 @@ def test_full_graph_happy_path_reaches_cleanup():
     assert visited == HAPPY_PATH_ORDER
     assert visited[-1] == "Cleanup"
     assert final["final_report"]
-    assert final["causal_evidence"][0]["weighting_status"] == "not_scored_without_cutoff"
+    assert final["causal_evidence"] == []
+    assert final["source_evidence"][0]["weighting_status"] == "causal_not_requested"
     assert "96000" in final["final_report"], "沙箱算出的金额必须注入报告"
     assert "计算明细" in final["final_report"]
 

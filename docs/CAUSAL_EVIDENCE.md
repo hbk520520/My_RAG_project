@@ -38,9 +38,9 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 
 ## 两条执行链的启用方式
 
-`config.yaml` 现已默认 `causal_evidence.enabled: true`，也可显式设 false 恢复旧流程。
-简单问答、复杂 LangGraph 任务和 Kafka Worker 均参与。提取和验证都复用已有
-`llm.judge_model`（不强制切换为论文的 GPT-4o-mini）；校准标识是 `<judge_model>:causal-v1`。
+`config.yaml` 默认 `causal_evidence.enabled: true`，表示部署允许该工具。
+新运行时由任务的 evidence.causal 决定是否实际调用；普通法条问答可以跳过因果图并保留原文引用。
+角色默认复用 `llm.judge_model`，可显式映射 API 模型或本地适配器，不强制使用论文的 GPT-4o-mini。
 每个块一次提取，有通过原文检查的候选才额外一次独立验证请求。验证器仍可能和提取器犯相同错误。
 检查新配置不会自动发起 LLM 请求；执行启用后的任务才会使用现有 API 配置。
 
@@ -51,14 +51,14 @@ router.process("预算削减是否导致资金紧张？",
                prediction_cutoff="2025-10-01", causal_targets=["资金紧张"])
 ```
 
-简单问答经真实检索 → CHAIN → Grader 后返回 `response`、`sufficient` 和 `causal_evidence`；
-复杂任务继续返回 `agent_report` 与 `agent_causal_evidence`。闲聊不进入证据管线。
-普通问答缺少截止日时仍构建并验证因果图，但 `weighting_status=not_scored_without_cutoff`。
+默认同步入口和 Kafka 作业都进入 AgentService，工具选择、并行和返回字段见 [PARALLEL_AGENT.md](PARALLEL_AGENT.md)。
+只有选择因果工具的任务才提取和验证；没有截止日时不计算时间权重。
+runtime.enabled=false 的历史入口保留原有总开关行为。闲聊不进入证据管线。
 不使用当前日期替代预测截止日，也不自动猜测目标同义词。
 
 启用 CHAIN 时，两条检索链使用图引擎编码器；命中摘要先展开回原文，即使长期记忆未启用也如此。
 证据记录和分块保留 `document_id`、`source_file`、`page_start`、`page_end`，传入 Grader/Reasoner/Generator。
-无原文关联的摘要不进入提取器。保留这些位置不等于已实现答案引用的程序校验，后者仍是待补能力。
+无原文关联的摘要不进入提取器。PageIndex 引用校验会检查已读原文的确切引文和位置，不证明语义蕴含。
 启用时，同步模型传输和 Grader 的失败上报给调用方，不用异常文本或未经评分的旧提取结果冒充成功。
 
 调用方仍需为检索图注入语料。节点 metadata 可提供 `record_id`、`source_id`、`timestamp`、
