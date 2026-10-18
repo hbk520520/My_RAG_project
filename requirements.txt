@@ -47,7 +47,7 @@ uvicorn>=0.27
 langgraph>=0.2
 
 # ---- 语料处理 ----
-PyMuPDF>=1.23
+PyMuPDF>=1.24.3  # 新 PDF 适配器使用稳定的 pymupdf 模块名
 
 # ---- 因果证据的 512-token / 64-overlap 分块（cl100k_base）----
 tiktoken==0.14.0

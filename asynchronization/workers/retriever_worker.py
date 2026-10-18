@@ -53,9 +53,13 @@ def build_engine() -> LegalDenseGraphBuilder:
     """
     构造图引擎，并尝试挂载检索器 LoRA（对齐 model/training/train_retriever.py 的产物）。
 
-    LoRA 目录不存在或加载失败时会退回原始 BGE-M3 权重，不阻断 Worker 启动。
+    关闭长期记忆时，LoRA 目录不存在或加载失败会退回原始 BGE-M3 权重。
+    长期记忆使用与入库相同的图编码器，不在查询端自动切换空间。
     """
     engine = LegalDenseGraphBuilder.from_config()
+    if engine._memory_store is not None:
+        logger.info("长期记忆检索使用 graph.model_name 编码器，与入库一致；不自动挂载 retriever.lora_path")
+        return engine
     lora_path = cfg.get("retriever", "lora_path")
 
     if not lora_path:
@@ -71,10 +75,10 @@ def build_engine() -> LegalDenseGraphBuilder:
 # ============================================================================
 # 检索
 # ============================================================================
-def _vector_recall(engine: LegalDenseGraphBuilder, query: str, k: int) -> list:
+def _vector_recall(engine: LegalDenseGraphBuilder, query: str, k: int, query_vector=None) -> list:
     """稠密向量召回，返回 [{id, content, score}]（已过滤 tombstone）"""
-    enc = engine.encode_text(query)
-    q_vec = enc["dense"].reshape(1, -1).astype("float32")
+    vector = engine.encode_text(query)["dense"] if query_vector is None else query_vector
+    q_vec = vector.reshape(1, -1).astype("float32")
 
     k = int(min(max(k, 1), engine.index.ntotal))
     sims, ids = engine.index.search(q_vec, k)
@@ -134,6 +138,7 @@ def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
     GRAPH_TRAVERSAL       : 向量召回 top_k，再沿语义边各扩展一跳
     GLOBAL_DENSE_WORMHOLE : 只做全局稠密召回（语义边不参与，用于跨领域找依据）
     """
+    engine.refresh_memory()
     if engine.index.ntotal == 0:
         logger.warning(
             "图引擎索引为空（FAISS 0 条），检索结果必然为空。"
@@ -143,7 +148,8 @@ def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
         return []
 
     try:
-        hits = _vector_recall(engine, query, top_k)
+        query_vector = engine.encode_text(query)["dense"]
+        hits = _vector_recall(engine, query, top_k, query_vector=query_vector)
     except Exception as e:
         logger.error(f"查询编码/召回失败，本次返回空结果: {e}")
         return []
@@ -158,7 +164,8 @@ def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
             logger.info(f"[{engine_kind}] 向量召回 {len(hits)} 条，图游走扩展 {len(extra)} 条")
             hits.extend(extra)
 
-    return hits
+    from dataset.long_term_memory import source_evidence_hits
+    return source_evidence_hits(engine, hits, len(hits), query_vector)
 
 
 # ============================================================================

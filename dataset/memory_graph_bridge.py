@@ -45,6 +45,8 @@ class MemoryGraphBridge:
         self.embed = embedding_fn        # None 表示"用引擎自己的编码器"
         self._pending_sync: List[Dict] = []  # 待同步到图引擎的节点
         self._warned_no_sparse = False
+        if self.graph._memory_store is not None and not self.mm.db.nodes:
+            self.bootstrap_from_graph()
 
     # ------------------------------------------------------------------
     # 0. 统一的「文本 → (dense, sparse)」
@@ -133,6 +135,8 @@ class MemoryGraphBridge:
             )
             logger.info(f"双写成功: 节点 {graph_node_id} ('{content[:30]}...')")
         except Exception as e:
+            if self.graph._memory_store is not None:
+                raise
             logger.error(f"图引擎写入失败 (节点 {graph_node_id}): {e}")
             # 记录待同步。
             # 阶段 9：必须把向量一起暂存 —— 否则重试时 add_node 会自己重新编码，
@@ -158,28 +162,48 @@ class MemoryGraphBridge:
 
         :param summary_fn: 输入子节点文本列表，返回新摘要文本的函数（通常为 LLM 调用）
         """
+        if self.graph._memory_store is None:
+            self._sync_dirty_summaries(summary_fn)
+            return
+        with self.graph.memory_transaction():
+            updates = self._sync_dirty_summaries(summary_fn)
+        # Only acknowledge runtime dirty flags after the durable graph commit succeeds.
+        for node_id, text, vector in updates:
+            self.mm.db.nodes[node_id].update(content=text, embedding=vector)
+            self.mm.db.clean_node(node_id)
+            self.mm.summary_embeddings[node_id] = vector
+            self.mm.set_node_text(node_id, text)
+
+    def _sync_dirty_summaries(self, summary_fn):
+        persistent = self.graph._memory_store is not None
+        updates = []
         dirty_nodes = self.mm.db.get_dirty_nodes()
         if not dirty_nodes:
             logger.info("无脏节点需要同步")
-            return
+            return updates
 
         for node_id in dirty_nodes:
+            if persistent and self.mm.db.nodes[node_id].get("status") == "tombstone":
+                continue
             # 从 MockGraphDB 获取子节点文本
             children = self.mm.db.get_children(node_id)
             child_texts = [
                 self.mm.get_node_text(c)
                 for c in children
-                if self.mm.get_node_text(c)
+                if self.mm.get_node_text(c) and self.mm.db.nodes[c].get("status") != "tombstone"
             ]
             if not child_texts:
                 continue
 
             # 生成新摘要
             new_summary = summary_fn(child_texts)
+            if persistent and (not new_summary or not str(new_summary).strip()):
+                raise ValueError("Summary generator returned empty text")
 
             # 更新 MockGraphDB
-            self.mm.db.nodes[node_id]["content"] = new_summary
-            self.mm.db.clean_node(node_id)
+            if not persistent:
+                self.mm.db.nodes[node_id]["content"] = new_summary
+                self.mm.db.clean_node(node_id)
 
             # 阶段 9：编码提到 try 之外 ——
             #   1. 只编一次，两个分支（更新已有顶点 / 新建顶点）共用同一份向量；
@@ -206,6 +230,15 @@ class MemoryGraphBridge:
                 )
                 logger.info(f"Summary {node_id} 在图引擎中新建 (ID={new_id})")
 
+            if persistent:
+                v = self.graph.graph.vs.find(name=vname(node_id))
+                v["metadata"].update(retrieval_role="navigation", derived=True, source_node_ids=children)
+                self.graph.dirty_summary_ids.discard(node_id)
+                updates.append((node_id, new_summary, enc["dense"]))
+
+        self.graph.persist_memory(rebuild_vectors=True)
+        return updates
+
     # ------------------------------------------------------------------
     # 3. 从图引擎节点构建 MockGraphDB 结构（用于冷启动 GMM）
     # ------------------------------------------------------------------
@@ -226,34 +259,38 @@ class MemoryGraphBridge:
             logger.info("GMM 摘要索引已有数据，跳过 bootstrap")
             return
 
-        # 遍历图引擎中的 Summary 节点
+        # 以图为持久化真源，包含未挂到摘要下的原文，避免冷启动后 ID 冲突。
         summary_count = 0
         for v in self.graph.graph.vs:
+            node_id = as_num_id(v["name"])
             if v["type"] == "Summary":
-                node_id = as_num_id(v["name"])
                 self.mm.db.add_node({
                     "type": "summary",
                     "content": v["content"],
                     "embedding": v["dense"],
-                    "level": v["metadata"].get("level", 1)
+                    "level": v["metadata"].get("level", 1),
+                    "status": v["metadata"].get("status", "active")
                 }, node_id=node_id)
-                self.mm.summary_embeddings[node_id] = v["dense"]
+                if v["metadata"].get("status") != "tombstone":
+                    self.mm.summary_embeddings[node_id] = v["dense"]
+                if v["metadata"].get("dirty") or node_id in self.graph.dirty_summary_ids:
+                    self.mm.db.mark_dirty(node_id)
                 self.mm.set_node_text(node_id, v["content"])
                 summary_count += 1
-
-                # 添加叶子节点关联
-                for child in self.graph.graph.vs:
-                    if (child["metadata"].get("parent_id") == node_id
-                            and child["type"] != "Summary"):
-                        child_id = as_num_id(child["name"])
-                        if child_id not in self.mm.db.nodes:
-                            self.mm.db.add_node({
-                                "type": "leaf",
-                                "content": child["content"],
-                                "embedding": child["dense"]
-                            }, node_id=child_id)
-                            self.mm.set_node_text(child_id, child["content"])
-                        self.mm.db.add_edge(node_id, child_id, "CONTAINS")
+            else:
+                self.mm.db.add_node({"type": "leaf", "content": v["content"],
+                                    "embedding": v["dense"], "status": v["metadata"].get("status", "active")},
+                                   node_id=node_id)
+                self.mm.set_node_text(node_id, v["content"])
+        for child in self.graph.graph.vs:
+            parent_id = child["metadata"].get("parent_id")
+            if parent_id in self.mm.db.nodes:
+                self.mm.db.add_edge(parent_id, as_num_id(child["name"]), "CONTAINS")
+        for parent in self.graph.graph.vs:
+            for child_id in parent["metadata"].get("source_node_ids", []):
+                edge = (as_num_id(parent["name"]), child_id, "CONTAINS")
+                if edge not in self.mm.db.edges:
+                    self.mm.db.add_edge(*edge)
 
         logger.info(f"从图引擎 bootstrap 完成: {summary_count} 个 Summary 节点")
 
@@ -271,6 +308,8 @@ class MemoryGraphBridge:
         try:
             self.graph.tombstone_node(node_id)
         except Exception as e:
+            if self.graph._memory_store is not None:
+                raise
             logger.error(f"图引擎 tombstone 失败 (节点 {node_id}): {e}")
             success = False
 

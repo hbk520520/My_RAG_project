@@ -388,6 +388,27 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 
 ---
 
+## 契约 12 · 跨任务的项目知识记忆
+
+说明见 [LONG_TERM_MEMORY.md](LONG_TERM_MEMORY.md)。`long_term_memory.enabled=false` 时保持旧流程。
+
+- `LegalDenseGraphBuilder.from_config()` 在启用后恢复同一项目的原文、摘要、元数据、向量、图边和脏标记。
+  `enable_memory(path, project_id, embedding_space_id)` 也可显式绑定；不得覆盖已加载的非空图。
+- `add_node`、初次批量入库、摘要生成/重算、软删除和桥接摘要同步自动保存。直接修改 igraph 属性必须显式
+  `persist_memory()`；一批变更使用 `memory_transaction()`，失败恢复本地图并重新抛错。
+- SQLite 原子快照按项目隔离，版本比较拒绝旧写者覆盖。冲突不得吞掉；调用者显式重新加载并重试，
+  `refresh_memory(discard_unsaved=True)` 会舍弃未保存的本地变更，不能自动调用。
+- 同步 Reasoner 与异步 Retriever 在检索前刷新记忆，启用后使用与入库相同的图引擎编码器。
+  Worker 不再自动挂载 `retriever.lora_path`；不同编码器/模型/LoRA 必须使用独立空间标识与库。
+- `import_tree` / `import_pdf` 接收 PageIndex 页码树，摘要仅作导航；检索返回原文及其页码/来源，
+  不把摘要当作事实证据。导入以文档版本幂等，内容改变须使用新 `document_id`。
+- 长期记忆模式绕开缺少记忆版本的旧答案缓存；不清空旧缓存。SQLite 只适用于本机持久磁盘；
+  不提供跨机器存储，也不保存 Agent 运行状态或外部副作用。
+
+验证入口：`tests/test_long_term_memory.py`，纳入 `tools/ci.py`。
+
+---
+
 ## 变更流程
 
 1. 改本文件（明确写清新旧契约与**迁移方式**）

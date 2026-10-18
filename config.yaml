@@ -46,6 +46,13 @@ graph:
   top_k_search: 50
   degree_threshold: 15
 
+# --- 项目级长期记忆：原文、摘要、来源与向量跨重启保留 ---
+long_term_memory:
+  enabled: false
+  path: ".memory/rag.sqlite"
+  project_id: "legal-rag"
+  embedding_space_id: "bge-m3-base-v1"  # 更换编码器/LoRA 时必须使用新的空间标识和记忆库
+
 # --- 检索器（BGE-M3 挂 LoRA，对齐 model/training/train_retriever.py 的产物）---
 retriever:
   lora_path: "./saved_loras/retriever_bge_m3"   # 目录不存在时自动退回原始 BGE-M3 权重

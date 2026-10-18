@@ -73,9 +73,10 @@ class UnifiedQueryRouter_Soul:
 
     def process(self, query: str, *, prediction_cutoff=None, causal_targets=None) -> Dict[str, Any]:
         causal_mode = cfg.get("causal_evidence", "enabled", default=False)
+        use_cache = not (causal_mode or cfg.get("long_term_memory", "enabled", default=False))
         # 1. 语义缓存拦截
-        # 旧缓存没有来源/截止时间，不能用于因果证据模式。
-        if self.cache and not causal_mode:
+        # 旧缓存没有来源/截止时间/记忆版本，不能用于这两种模式。
+        if self.cache and use_cache:
             q_vec = self._router.embedder.encode(query, normalize_embeddings=True)
             cached_answer = self.cache.lookup(q_vec)
             if cached_answer is not None:
@@ -95,7 +96,7 @@ class UnifiedQueryRouter_Soul:
         result = self._router.process(query, **context)
 
         # 3. 写回缓存：对简单问答和复杂任务的结果进行缓存
-        if self.cache and not causal_mode and result.get("status") in ("simple_rag", "agent_execution"):
+        if self.cache and use_cache and result.get("status") in ("simple_rag", "agent_execution"):
             answer = result.get("response") or result.get("agent_report", "")
             if answer:
                 self.cache.add(
@@ -325,9 +326,13 @@ class Reasoner:
         return [evidence_from_hit(hit) for hit in self._retrieve_hits(query)]
 
     def _retrieve_hits(self, query: str):
-        if not self.legal_graph or not self.embedding_fn:
+        if not self.legal_graph:
             return []
-        emb = self.embedding_fn(query)
+        persistent = self.legal_graph._memory_store is not None
+        if not persistent and not self.embedding_fn:
+            return []
+        self.legal_graph.refresh_memory()
+        emb = self.legal_graph.encode_text(query)["dense"] if persistent else self.embedding_fn(query)
         norm_emb = self.legal_graph._l2_normalize(emb).reshape(1, -1).astype(np.float32)
         k = min(5, self.legal_graph.index.ntotal)
         if k == 0:
@@ -340,10 +345,12 @@ class Reasoner:
                     # 阶段 10：图内顶点名恒为 str(int)，FAISS 给的是 int64
                     node = self.legal_graph.graph.vs.find(name=vname(nid))
                     metadata = node["metadata"]
-                    docs.append({"id": int(nid), "content": node["content"], "metadata": metadata})
+                    docs.append({"id": int(nid), "content": node["content"], "metadata": metadata,
+                                 "score": float(sim)})
                 except ValueError:
                     pass
-        return docs
+        from dataset.long_term_memory import source_evidence_hits
+        return source_evidence_hits(self.legal_graph, docs, 5, norm_emb)
 
     def answer(self, sub_task: str, original_query: str, *, prediction_cutoff=None,
                causal_targets=None) -> Dict[str, Any]:

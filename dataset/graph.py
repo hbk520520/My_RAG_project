@@ -23,6 +23,7 @@
 技术栈: FlagEmbedding (BGE-M3) / FAISS (HNSW) / igraph / numpy
 """
 import os, sys, time, logging, hashlib
+from contextlib import contextmanager
 import numpy as np
 import faiss
 import igraph as ig
@@ -136,6 +137,11 @@ class LegalDenseGraphBuilder:
 
         # ---- ID 分配兜底 ----
         self._fallback_id_counter = 0
+        self._memory_store = None
+        self._memory_revision = 0
+        self._memory_space_id = "unbound"
+        self._memory_pending = False
+        self._memory_pause = 0
 
         logger.info(f"图引擎初始化: dim={self.dim}, alpha={self.alpha}, "
                     f"connect={self.connect_thresh}, label={self.label_thresh}")
@@ -144,11 +150,11 @@ class LegalDenseGraphBuilder:
     # 构造入口
     # ------------------------------------------------------------------
     @classmethod
-    def from_config(cls) -> "LegalDenseGraphBuilder":
+    def from_config(cls, *, load_memory: bool = True) -> "LegalDenseGraphBuilder":
         """从 config.yaml 的 graph.* 段构造图引擎（推荐入口）"""
         if cfg is None:
             raise RuntimeError("config_loader 不可用，无法从配置构造图引擎")
-        return cls(
+        engine = cls(
             model_name=cfg.get("graph", "model_name", default="BAAI/bge-m3"),
             use_fp16=cfg.get("graph", "use_fp16", default=True),
             embedding_dim=cfg.get("graph", "embedding_dim", default=1024),
@@ -158,6 +164,83 @@ class LegalDenseGraphBuilder:
             top_k_search=cfg.get("graph", "top_k_search", default=50),
             degree_threshold=cfg.get("graph", "degree_threshold", default=15),
         )
+        if load_memory and cfg.get("long_term_memory", "enabled", default=False):
+            from pathlib import Path
+            path = Path(cfg.get("long_term_memory", "path"))
+            if not path.is_absolute():
+                path = Path(_ROOT_DIR) / path
+            engine.enable_memory(path, cfg.get("long_term_memory", "project_id"),
+                                 cfg.get("long_term_memory", "embedding_space_id"))
+        return engine
+
+    def enable_memory(self, path, project_id: str, embedding_space_id: str):
+        from dataset.long_term_memory import MemoryStore, restore_graph
+        if not embedding_space_id or not embedding_space_id.strip():
+            raise ValueError("Long-term memory requires an explicit embedding_space_id")
+        store = MemoryStore(path, project_id)
+        revision, payload = store.load()
+        if payload is not None and self.graph.vcount():
+            raise ValueError("Load long-term memory before adding new graph nodes")
+        self._memory_space_id = embedding_space_id
+        if payload is not None:
+            restore_graph(self, payload)
+        self._memory_store, self._memory_revision = store, revision
+        if payload is None and self.graph.vcount():
+            self.persist_memory()
+        return self
+
+    def persist_memory(self, *, rebuild_vectors: bool = False):
+        if self._memory_store is None:
+            return
+        from dataset.long_term_memory import graph_snapshot, rebuild_index
+        self._memory_pending = True
+        if rebuild_vectors:
+            rebuild_index(self)
+        if self._memory_pause:
+            return
+        self._memory_revision = self._memory_store.save(graph_snapshot(self), self._memory_revision)
+        self._memory_pending = False
+
+    def refresh_memory(self, *, discard_unsaved: bool = False):
+        """Readers refresh between tasks; failed local writes require explicit handling."""
+        if self._memory_store is None:
+            return
+        from dataset.long_term_memory import restore_graph
+        if self._memory_pending and not discard_unsaved:
+            raise RuntimeError("Unsaved long-term memory changes; reload explicitly before retrying")
+        revision, payload = self._memory_store.load()
+        if payload is None and self._memory_revision:
+            raise ValueError("Persisted project memory disappeared")
+        if payload is not None and (revision != self._memory_revision or discard_unsaved):
+            restore_graph(self, payload)
+            self._memory_revision = revision
+        elif payload is None and discard_unsaved:
+            from dataset.long_term_memory import rebuild_index
+            self.graph = ig.Graph(directed=False)
+            rebuild_index(self)
+            self.tombstone_ids.clear()
+            self.dirty_summary_ids.clear()
+            self.pending_cluster_seeds.clear()
+            self._fallback_id_counter = 0
+        self._memory_pending = False
+
+    @contextmanager
+    def memory_transaction(self):
+        """An import or rewrite publishes one coherent graph, including hierarchy links."""
+        from dataset.long_term_memory import graph_snapshot, restore_graph
+        before = graph_snapshot(self)
+        paused, pending = self._memory_pause, self._memory_pending
+        self._memory_pause += 1
+        try:
+            yield
+            self._memory_pause = paused
+            if not paused:
+                self.persist_memory()
+        except BaseException:
+            # Restore and re-raise; this boundary never hides the original failure.
+            self._memory_pause, self._memory_pending = paused, pending
+            restore_graph(self, before)
+            raise
 
     # ------------------------------------------------------------------
     # 编码器（懒加载）
@@ -337,10 +420,14 @@ class LegalDenseGraphBuilder:
         建边规则：connect_threshold <= 混合相似度 < label_threshold 才连边。
         等于或高于 label_threshold 视为"几乎完全冗余"，不连边而是打 similar_to 标签。
         """
+        if self._memory_store is not None and self.graph.vcount():
+            raise ValueError("Initial batch would overwrite long-term memory; use incremental add_node")
         total_nodes = len(nodes_data)
         if total_nodes == 0:
             logger.warning("build_initial_graph_batch 收到空节点列表，跳过")
             return
+        if self._memory_store is not None and len({as_num_id(n["id"]) for n in nodes_data}) != total_nodes:
+            raise ValueError("Duplicate node IDs in initial memory batch")
 
         # ---- 1. 准备向量 ----
         if embeddings is None:
@@ -420,6 +507,7 @@ class LegalDenseGraphBuilder:
 
         logger.info(f"初始图谱构建完毕：{self.graph.vcount()} 个节点，"
                     f"{self.graph.ecount()} 条边。")
+        self.persist_memory()
 
     # ------------------------------------------------------------------
     # 增量添加节点（挂载 + 脏传播 + tombstone 过滤）
@@ -444,6 +532,8 @@ class LegalDenseGraphBuilder:
         """
         if metadata is None:
             metadata = {}
+        if self._memory_store is not None and self.graph.vcount() and vname(node_id) in self.graph.vs["name"]:
+            raise ValueError(f"Node ID {node_id} already exists in long-term memory")
 
         # 只在确有缺失时才编码（两个都给齐了就完全不碰编码器）
         if dense is None or sparse is None:
@@ -473,6 +563,7 @@ class LegalDenseGraphBuilder:
 
         if self.index.ntotal == 0:
             self.index.add_with_ids(dense_vec.reshape(1, -1), np.array([node_id], dtype=np.int64))
+            self.persist_memory()
             return True
 
         # 检索 top_k 候选（排除 tombstone 节点）
@@ -490,6 +581,7 @@ class LegalDenseGraphBuilder:
         filt_ids = cand_ids[valid_mask].astype(int)
         if len(filt_ids) == 0:
             self.index.add_with_ids(dense_vec.reshape(1, -1), np.array([node_id], dtype=np.int64))
+            self.persist_memory()
             return True
 
         # 限制到 top_k 个有效候选
@@ -538,6 +630,7 @@ class LegalDenseGraphBuilder:
 
         self._propagate_dirty(node_id)
         self.check_and_trigger_clustering(node_id)
+        self.persist_memory()
         return True
 
     # ------------------------------------------------------------------
@@ -560,6 +653,7 @@ class LegalDenseGraphBuilder:
         logger.info(f"节点 {node_id} 已软删除（tombstone），对前端隐身")
 
         self._propagate_dirty(node_id)
+        self.persist_memory(rebuild_vectors=True)
         return True
 
     # ------------------------------------------------------------------
@@ -729,6 +823,8 @@ class LegalDenseGraphBuilder:
         # ---- 分配 ID ----
         if summary_id is None:
             summary_id = self._generate_unique_id()
+        elif self._memory_store is not None and self.graph.vcount() and vname(summary_id) in self.graph.vs["name"]:
+            raise ValueError(f"Node ID {summary_id} already exists in long-term memory")
 
         # ---- 写入图与索引 ----
         enc = self.encode_text(summary_text)
@@ -756,12 +852,22 @@ class LegalDenseGraphBuilder:
         self.dirty_summary_ids.discard(summary_id)
         logger.info(f"摘要节点 {summary_id} 生成完成"
                     f"（参与文本 {len(used_texts)} 条，挂载子节点 {mounted} 个）")
+        if self._memory_store is not None:
+            self.graph.vs.find(name=vname(summary_id))["metadata"]["retrieval_role"] = "navigation"
+        self.persist_memory()
         return int(summary_id)
 
     # ------------------------------------------------------------------
     # 夜间局部重算
     # ------------------------------------------------------------------
     def nightly_recalc_summaries(self, llm_generate_fn: Callable[[List[str]], str]):
+        if self._memory_store is not None:
+            with self.memory_transaction():
+                self._rewrite_summaries(llm_generate_fn)
+            return
+        self._rewrite_summaries(llm_generate_fn)
+
+    def _rewrite_summaries(self, llm_generate_fn: Callable[[List[str]], str]):
         """重新生成所有被标记为 dirty 的 Summary 节点，并清除 dirty 标记"""
         if not self.dirty_summary_ids:
             logger.info("无脏摘要节点，跳过重算")
@@ -796,7 +902,9 @@ class LegalDenseGraphBuilder:
                 child_texts = child_texts[:self.max_cluster_size]
 
             new_summary = llm_generate_fn(child_texts)
-            if not new_summary:
+            if not new_summary or not str(new_summary).strip():
+                if self._memory_store is not None:
+                    raise ValueError("Summary generator returned empty text")
                 logger.warning(f"摘要节点 {summary_id} 重算返回空，保留原内容")
                 continue
 
@@ -807,9 +915,10 @@ class LegalDenseGraphBuilder:
             v["metadata"]["dirty"] = False
             logger.info(f"摘要节点 {summary_id} 重算完成")
 
-            # 说明：FAISS 不支持原地更新向量，这里不重写索引。
-            # 摘要节点通常由子节点检索后汇聚，不参与初始近邻检索；
-            # 若确有需要，应重建索引（成本高，放到离线任务里做）。
+            # 关闭长期记忆时保留原来的索引行为；启用时在循环结束统一重建，
+            # 让新的摘要向量立即参与导航召回。
+
+        self.persist_memory(rebuild_vectors=True)
 
 
 # ------------------------------------------------------------------

@@ -19,6 +19,7 @@ env/
 dlq.jsonl
 *.log
 outputs/
+.memory/
 
 # ---- 测试产物 ----
 .pytest_cache/
