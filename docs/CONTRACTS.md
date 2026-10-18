@@ -416,6 +416,23 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 
 ---
 
+## 契约 13 · 文档读取与已读证据引用
+
+- `DocumentReader.from_file(path, project_id)` 使用只读 SQLite 连接，缺失库报错；
+  文档清单/目录/原页读取不创建数据库、建图、生成摘要或加载编码器。
+- `read_structure(document_id, version=...)` 与 `read_pages(document_id, pages, version=...)`
+  只访问同一项目快照中的文档；页码是 1 起始 PDF 物理页码。错误版本、缺失/删除页拒绝读取。
+- `document_version` 为可选来源字段，使用已有内容指纹，不改变已有数据库结构。
+- `pageindex.enabled` 时，含版本化文档证据的回答须引用本次实际已读原文。
+  模型输出只选择程序分配的 E1/E2 等 ID 及原文引句；不能自行决定文档、版本或页码。
+- 简单问答的 `response`、Agent/Worker 的 `final_report` 仍为字符串，并可新增 `citations`。
+  未读 ID、缺失/重复引用或不在原文中的引句导致失败，不能发布为成功报告。
+- 引用身份/引句校验不等于语义蕴含验证；不据此声明事实正确率提升。
+
+说明见 [PAGEINDEX_IMPLEMENTATION.md](PAGEINDEX_IMPLEMENTATION.md)，测试为 `tests/test_pageindex.py`。
+
+---
+
 ## 变更流程
 
 1. 改本文件（明确写清新旧契约与**迁移方式**）

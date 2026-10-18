@@ -482,6 +482,7 @@ class AgentState(TypedDict):
     prediction_cutoff: Optional[str]                     # 可选：预测截止日（不使用系统当前时间猜测）
     causal_targets: List[str]                            # 可选：图中明确的目标实体
     causal_evidence: Annotated[List[dict], operator.add]  # 可选：每任务因果证据审计
+    citations: List[dict]                               # 可选：从已读原文校验的引用
 
 
 def node_l0_gateway(state: AgentState) -> dict:
@@ -687,13 +688,23 @@ def node_generate(state: AgentState, agentic_ops: AgenticNodesOperator) -> dict:
             "sub_task": state["task_queue"][idx] if idx < len(state["task_queue"]) else "总结",
             "reasoning": obs
         })
-    report = agentic_ops.generate_final_report(state["user_query"], accumulated)
+    from dataset.citations import requires_citations, generate_cited_answer
+    analyses = state.get("causal_evidence", [])
+    citations = None
+    if requires_citations(analyses):
+        cited = generate_cited_answer(prompts.build_generator_messages(state["user_query"], accumulated), analyses,
+                                      lambda messages: agentic_ops._call_messages(messages, require_json=True))
+        report, citations = cited["answer"], cited["citations"]
+    else:
+        report = agentic_ops.generate_final_report(state["user_query"], accumulated)
 
     # 检测是否需要金额计算 → 触发沙箱流程
     calc_keywords = ["赔偿", "补偿", "加班费", "工资", "双倍", "2N", "N+1", "金额", "元"]
     needs_calc = any(kw in state["user_query"] + report for kw in calc_keywords)
 
     result = {"final_report": report}
+    if citations is not None:
+        result["citations"] = citations
     if needs_calc:
         result["needs_sandbox_calc"] = True
         result["sandbox_retries"] = 0

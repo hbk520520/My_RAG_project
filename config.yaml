@@ -53,6 +53,15 @@ long_term_memory:
   project_id: "legal-rag"
   embedding_space_id: "bge-m3-base-v1"  # 更换编码器/LoRA 时必须使用新的空间标识和记忆库
 
+# --- PageIndex 思路的本地文档检索与引用；复用现有存储和模型接缝 ---
+pageindex:
+  enabled: true
+  navigation: "vector"       # 保留向量基线；"agent" 为有预算的目录/按页读取
+  max_turns: 4
+  max_pages: 8
+  max_read_tokens: 6000
+  max_structure_tokens: 3000
+
 # --- 检索器（BGE-M3 挂 LoRA，对齐 model/training/train_retriever.py 的产物）---
 retriever:
   lora_path: "./saved_loras/retriever_bge_m3"   # 目录不存在时自动退回原始 BGE-M3 权重

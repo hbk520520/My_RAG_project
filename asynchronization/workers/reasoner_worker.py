@@ -240,7 +240,17 @@ def main():
                 logger.info(f"Session {session_id}: 核算明细 = {calc_detail[:120]}")
 
             # ---- 生成最终报告 ----
-            final_report = call_generator_llm(user_query, reasoning_chain)
+            from dataset.citations import requires_citations, generate_cited_answer
+            analyses = [obs["causal_evidence"] for obs in past_observations
+                        if isinstance(obs, dict) and "causal_evidence" in obs]
+            if requires_citations(analyses):
+                from causal_evidence.pipeline import causal_completion
+                cited = generate_cited_answer(build_generator_messages(user_query, reasoning_chain), analyses,
+                                              causal_completion)
+                final_report = cited["answer"]
+                state["citations"] = cited["citations"]
+            else:
+                final_report = call_generator_llm(user_query, reasoning_chain)
             if calc_detail:
                 final_report = f"{final_report}\n\n【计算明细】\n{calc_detail}"
 

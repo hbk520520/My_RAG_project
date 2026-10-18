@@ -32,11 +32,16 @@ def _json_value(value):
 
 
 class MemoryStore:
-    def __init__(self, path: str | Path, project_id: str):
+    def __init__(self, path: str | Path, project_id: str, *, read_only: bool = False):
         if not project_id.strip():
             raise ValueError("project_id must not be empty")
         self.path = Path(path)
         self.project_id = project_id
+        self.read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(self.path)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self.connect()) as connection, connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -45,6 +50,8 @@ class MemoryStore:
                 sha256 TEXT NOT NULL, payload BLOB NOT NULL)""")
 
     def connect(self):
+        if self.read_only:
+            return sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
         connection = sqlite3.connect(self.path, timeout=10)
         connection.execute("PRAGMA synchronous=FULL")
         return connection
@@ -61,6 +68,8 @@ class MemoryStore:
         return row[0], json.loads(raw)
 
     def save(self, payload: dict, expected_revision: int):
+        if self.read_only:
+            raise PermissionError("Document reads cannot write project memory")
         raw = json.dumps(payload, ensure_ascii=False, allow_nan=False, default=_json_value).encode("utf-8")
         checksum = hashlib.sha256(raw).hexdigest()
         with closing(self.connect()) as connection, connection:

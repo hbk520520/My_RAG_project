@@ -33,6 +33,7 @@ def evidence_from_hit(hit: dict, *, similarity: float | None = None) -> Evidence
         record_id=str(metadata.get("record_id", hit["id"])), text=hit["content"],
         source_id=metadata.get("source_id"), timestamp=metadata.get("timestamp"),
         document_id=metadata.get("document_id"), source_file=metadata.get("source_file"),
+        document_version=metadata.get("document_fingerprint"),
         page_start=metadata.get("page_start"), page_end=metadata.get("page_end"),
         available_at=metadata.get("available_at"),
         availability_verified=metadata.get("availability_verified", False),
@@ -90,7 +91,7 @@ def analyze_evidence(records: list[EvidenceRecord], question: str, call, *,
             "notice": "Use original evidence for facts; use only verified_causal_relations for causal claims. "
                       "Scores measure textual support and temporal validity, never effect sizes or forecast probabilities.",
             "admitted_evidence": [c.model_dump(mode="json", include={
-                "record_id", "chunk_id", "source_id", "document_id", "source_file", "page_start", "page_end", "text"})
+                "record_id", "chunk_id", "source_id", "document_id", "document_version", "source_file", "page_start", "page_end", "text"})
                 for c in graph.source_chunks],
             "verified_causal_relations": serialized["causal_edges"], "weighting": weighting,
         }, ensure_ascii=False)

@@ -13,6 +13,7 @@ class Contract(BaseModel):
 
 class SourceLocation(Contract):
     document_id: str | None = Field(default=None, min_length=1)
+    document_version: str | None = Field(default=None, min_length=1)
     source_file: str | None = Field(default=None, min_length=1)
     page_start: int | None = Field(default=None, ge=1)
     page_end: int | None = Field(default=None, ge=1)

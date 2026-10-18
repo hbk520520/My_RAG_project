@@ -238,8 +238,15 @@ class UnifiedQueryRouter_Query:
                                              causal_targets=causal_targets)
                     analysis = answer["causal_evidence"]
                     result.update(status="simple_rag", sufficient=answer["sufficient"], causal_evidence=analysis)
-                    result["response"] = (agentic_ops.reason(query, answer["fact"] + "\n" + analysis["context"])
-                                          if answer["sufficient"] else answer["fact"])
+                    from dataset.citations import requires_citations, generate_cited_answer
+                    if answer["sufficient"] and requires_citations([analysis]):
+                        cited = generate_cited_answer(
+                            prompts.build_reasoner_messages(query, answer["fact"] + "\n" + analysis["context"]),
+                            [analysis], lambda messages: agentic_ops._call_messages(messages, require_json=True))
+                        result.update(response=cited["answer"], citations=cited["citations"])
+                    else:
+                        result["response"] = (agentic_ops.reason(query, answer["fact"] + "\n" + analysis["context"])
+                                              if answer["sufficient"] else answer["fact"])
                     return result
 
                 agent = build_plan_replan_agent(reasoner, agentic_ops)
@@ -263,6 +270,8 @@ class UnifiedQueryRouter_Query:
                 result["agent_observations"] = final_state.get("past_observations", [])
                 if final_state.get("causal_evidence"):
                     result["agent_causal_evidence"] = final_state["causal_evidence"]
+                if final_state.get("citations"):
+                    result["citations"] = final_state["citations"]
                 result["status"] = "agent_execution"
 
             except Exception as e:
