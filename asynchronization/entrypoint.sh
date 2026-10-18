@@ -3,8 +3,8 @@
 # 合法取值: planner | retriever | grader | replanner | reasoner
 set -e
 
-# 脚本所在目录即应用根目录（镜像中为 /app）
-APP_ROOT="$(cd "$(dirname "$0")" && pwd)"
+# 脚本位于 /app/asynchronization；应用根目录是它的上一级。
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKERS_DIR="$APP_ROOT/asynchronization/workers"
 
 # 统一注入 PYTHONPATH：根目录（config_loader/prompts/double_layer_plan）

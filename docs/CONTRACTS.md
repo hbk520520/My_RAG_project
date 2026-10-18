@@ -363,6 +363,31 @@ attempts  (task_id TEXT, at INTEGER)               -- 每次调用都记：证�
 
 ---
 
+## 契约 11 · 因果证据与文本支持权重
+
+实现和配置说明见 [CAUSAL_EVIDENCE.md](CAUSAL_EVIDENCE.md)；配置入口为 `causal_evidence`。
+该能力默认关闭。关闭时，原有文本检索接口、状态流转、缓存和报告字段保持兼容。
+
+- `query.process` 与 `UnifiedQueryRouter_Soul.process` 可选接收仅关键字参数
+  `prediction_cutoff`、`causal_targets`；原有单个 query 参数仍然有效。
+- LangGraph 状态可增加 `prediction_cutoff`、`causal_targets` 和使用追加归约的
+  `causal_evidence`。Executor 在检索后、Grader 前处理；审计结果和文本权重进入后续报告上下文。
+- Kafka 消息仍仅携带 `session_id`。启用时 Retriever 的 observation 增加 `evidence_records`，
+  Grader 的 observation 增加 `causal_evidence`；下一条消息发送前必须保存审计结果。
+  `record_id` 标识证据记录，`source_id` 可把转载、改写和同源记录归为一个支持组。
+- 已检索的旧会话若没有 `evidence_records`，启用后必须重新检索；不从纯字符串伪造来源和可用时间。
+- 已知时间等于截止日也被排除；缺失时间必须有外部核实的提前可用边界。无截止日只做一般证据分析。
+- `raw_support` 永远保留 LLM 原分，未加载标注校准器时 `calibrated_support=null`。
+  校准器必须匹配提取器标识，且标注可用日期早于截止日。两个分数均不表示真实因果效应。
+- 解析或验证失败必须显式失败，不能返回原始未验证关系冒充通过。无合格证据或无目标锚点则明确不评分。
+- 启用时不读写没有来源/截止日的旧语义答案缓存；不清空其他会话的缓存。
+- 因果图是独立的程序组装结构，不改变原 igraph 语义边，也不替换 `benchmark_causal` 的确定性 SCM。
+- 只实现 CHAIN 的图构建和数据权重。未实现 Noisy-OR、预测概率融合或论文的完整预测系统。
+
+验证入口：`tests/test_causal_evidence.py`、`tests/test_causal_pipeline.py`，并纳入现有 `tools/ci.py`。
+
+---
+
 ## 变更流程
 
 1. 改本文件（明确写清新旧契约与**迁移方式**）

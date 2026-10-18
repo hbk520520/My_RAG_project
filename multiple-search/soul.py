@@ -71,9 +71,11 @@ class UnifiedQueryRouter_Soul:
         else:
             self._router = query_router
 
-    def process(self, query: str) -> Dict[str, Any]:
+    def process(self, query: str, *, prediction_cutoff=None, causal_targets=None) -> Dict[str, Any]:
+        causal_mode = cfg.get("causal_evidence", "enabled", default=False)
         # 1. 语义缓存拦截
-        if self.cache:
+        # 旧缓存没有来源/截止时间，不能用于因果证据模式。
+        if self.cache and not causal_mode:
             q_vec = self._router.embedder.encode(query, normalize_embeddings=True)
             cached_answer = self.cache.lookup(q_vec)
             if cached_answer is not None:
@@ -85,10 +87,15 @@ class UnifiedQueryRouter_Soul:
                 }
 
         # 2. 委托给 query.py 的路由逻辑
-        result = self._router.process(query)
+        context = {}
+        if prediction_cutoff is not None:
+            context["prediction_cutoff"] = prediction_cutoff
+        if causal_targets is not None:
+            context["causal_targets"] = causal_targets
+        result = self._router.process(query, **context)
 
         # 3. 写回缓存：对简单问答和复杂任务的结果进行缓存
-        if self.cache and result.get("status") in ("simple_rag", "agent_execution"):
+        if self.cache and not causal_mode and result.get("status") in ("simple_rag", "agent_execution"):
             answer = result.get("response") or result.get("agent_report", "")
             if answer:
                 self.cache.add(
@@ -310,13 +317,21 @@ class Reasoner:
 
     def retrieve(self, query: str) -> str:
         """从法律图谱检索相关文档，返回合并后的文本"""
+        return "\n---\n".join(hit["content"] for hit in self._retrieve_hits(query))
+
+    def retrieve_records(self, query: str):
+        """保留原文来源和时间元数据；因果图不能从语义相似边推导。"""
+        from causal_evidence.pipeline import evidence_from_hit
+        return [evidence_from_hit(hit) for hit in self._retrieve_hits(query)]
+
+    def _retrieve_hits(self, query: str):
         if not self.legal_graph or not self.embedding_fn:
-            return ""
+            return []
         emb = self.embedding_fn(query)
         norm_emb = self.legal_graph._l2_normalize(emb).reshape(1, -1).astype(np.float32)
         k = min(5, self.legal_graph.index.ntotal)
         if k == 0:
-            return ""
+            return []
         sims, ids = self.legal_graph.index.search(norm_emb, k)
         docs = []
         for sim, nid in zip(sims[0], ids[0]):
@@ -324,17 +339,31 @@ class Reasoner:
                 try:
                     # 阶段 10：图内顶点名恒为 str(int)，FAISS 给的是 int64
                     node = self.legal_graph.graph.vs.find(name=vname(nid))
-                    docs.append(node["content"])
+                    metadata = node["metadata"]
+                    docs.append({"id": int(nid), "content": node["content"], "metadata": metadata})
                 except ValueError:
                     pass
-        return "\n---\n".join(docs)
+        return docs
 
-    def answer(self, sub_task: str, original_query: str) -> Dict[str, Any]:
+    def answer(self, sub_task: str, original_query: str, *, prediction_cutoff=None,
+               causal_targets=None) -> Dict[str, Any]:
+        if cfg.get("causal_evidence", "enabled", default=False):
+            from causal_evidence.pipeline import analyze_configured
+            analysis = analyze_configured(
+                self.retrieve_records(sub_task), original_query,
+                lambda messages: self.agentic_ops._call_messages(messages, require_json=True, temperature=0),
+                prediction_cutoff=prediction_cutoff, targets=causal_targets,
+            )
+            result = self._answer_from_docs(sub_task, original_query, analysis["context"])
+            result["causal_evidence"] = analysis
+            return result
+        return self._answer_from_docs(sub_task, original_query, self.retrieve(sub_task))
+
+    def _answer_from_docs(self, sub_task: str, original_query: str, docs: str) -> Dict[str, Any]:
         """
         对子任务进行检索、抽取事实、推理，并判断信息是否充足。
         现优先使用 Grader 结构化输出；若无法获得则回退原有逻辑。
         """
-        docs = self.retrieve(sub_task)
         if not docs:
             return {
                 "fact": "未检索到相关文档",
@@ -437,6 +466,9 @@ class AgentState(TypedDict):
     calc_result: Optional[str]                           # 沙箱执行的计算结果
     sandbox_retries: int                                 # 沙箱重试次数
     needs_sandbox_calc: bool                             # 是否需要金额计算
+    prediction_cutoff: Optional[str]                     # 可选：预测截止日（不使用系统当前时间猜测）
+    causal_targets: List[str]                            # 可选：图中明确的目标实体
+    causal_evidence: Annotated[List[dict], operator.add]  # 可选：每任务因果证据审计
 
 
 def node_l0_gateway(state: AgentState) -> dict:
@@ -511,13 +543,19 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     logger.info(f"Executor 正在处理: {actual_query[:80]}")
 
     # 使用 Reasoner 进行检索、推理、判断充足性
-    result = reasoner.answer(actual_query, original_query=state["user_query"])
+    causal_args = {}
+    if cfg.get("causal_evidence", "enabled", default=False):
+        causal_args = {"prediction_cutoff": state.get("prediction_cutoff"),
+                       "causal_targets": state.get("causal_targets")}
+    result = reasoner.answer(actual_query, original_query=state["user_query"], **causal_args)
 
     # 构造观察记录（包含引擎信息）
     task_label = actual_query[:60]
     observation = (f"【任务：{task_label}】【引擎：{engine}】\n"
                    f"事实：{result['fact']}\n"
                    f"推理：{result['reasoning']}")
+    if "causal_evidence" in result:
+        observation += "\n因果证据与文本权重：\n" + result["causal_evidence"]["context"]
 
     new_queue = state["task_queue"][1:]  # 默认移除当前任务
 
@@ -553,13 +591,16 @@ def node_executor(state: AgentState, reasoner: Reasoner) -> dict:
     elif isinstance(result['fact'], list):
         facts_to_add.extend(result['fact'])
 
-    return {
+    delta = {
         "task_queue": new_queue,
         "past_observations": [observation],
         "global_facts": state.get("global_facts", []) + facts_to_add,
         "retry_context": retry_ctx,
         "recursion_depth": depth + 1
     }
+    if "causal_evidence" in result:
+        delta["causal_evidence"] = [result["causal_evidence"]]
+    return delta
 
 
 def node_replanner(state: AgentState,

@@ -209,6 +209,8 @@ def main():
                     facts_text = "\n".join(facts) if isinstance(facts, list) else str(facts)
 
                     if facts_text:
+                        if "causal_evidence" in obs:
+                            facts_text += "\n因果证据与文本权重：\n" + obs["causal_evidence"]["context"]
                         reasoning = call_reasoner_llm(sub_task, facts_text)
                     else:
                         reasoning = "无有效事实，跳过推理"
@@ -219,6 +221,8 @@ def main():
                         "reasoning": reasoning,
                         "facts": facts_text
                     })
+                    if "causal_evidence" in obs:
+                        reasoning_chain[-1]["causal_evidence"] = obs["causal_evidence"]
                     logger.info(f"Session {session_id}: Hop {idx+1} 推理完成")
 
             # ---- 检测是否需要代码计算 ----

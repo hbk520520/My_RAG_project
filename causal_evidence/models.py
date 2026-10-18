@@ -13,6 +13,7 @@ class Contract(BaseModel):
 
 class EvidenceRecord(Contract):
     record_id: str = Field(min_length=1)
+    source_id: str | None = Field(default=None, min_length=1)
     text: str = Field(min_length=1)
     timestamp: date | None = None
     available_at: date | None = None
@@ -23,6 +24,7 @@ class EvidenceRecord(Contract):
 class TextChunk(Contract):
     chunk_id: str
     record_id: str
+    source_id: str | None = None
     text: str
     char_start: int
     char_end: int
@@ -80,6 +82,7 @@ class Hyperedge(Contract):
     id: str
     chunk_id: str
     record_id: str
+    source_id: str | None = None
     proposition: str
     entities: list[str]
     evidence_quote: str
@@ -109,10 +112,12 @@ class Rejection(Contract):
     chunk_id: str
     candidate_index: int | None = None
     proposition_index: int | None = None
+    candidate: CausalRelation | None = None
     reason: str
 
 
 class CausalTemporalGraph(Contract):
+    source_chunks: list[TextChunk] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     hyperedges: list[Hyperedge] = Field(default_factory=list)
     causal_edges: list[CausalEdge] = Field(default_factory=list)
@@ -131,4 +136,3 @@ class CausalTemporalGraph(Contract):
             if hyperedge is None or not {edge.cause, edge.effect}.issubset(hyperedge.entities):
                 raise ValueError("Causal endpoints require a supporting hyperedge")
         return self
-

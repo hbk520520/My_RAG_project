@@ -201,7 +201,7 @@ class UnifiedQueryRouter_Query:
     # ==========================================================
     # 兼容第一段代码的 process 接口（可选）
     # ==========================================================
-    def process(self, query: str) -> Dict[str, Any]:
+    def process(self, query: str, *, prediction_cutoff=None, causal_targets=None) -> Dict[str, Any]:
         result = self.route(query)
         # 如果需要唤醒 Agent 图引擎，在这里根据 intent 进一步处理
         if result["intent"] == "COMPLEX_TASK":
@@ -243,10 +243,16 @@ class UnifiedQueryRouter_Query:
                     "retry_context": {},
                     "recursion_depth": 0
                 }
+                if prediction_cutoff is not None:
+                    initial_state["prediction_cutoff"] = prediction_cutoff
+                if causal_targets is not None:
+                    initial_state["causal_targets"] = causal_targets
 
                 final_state = agent.invoke(initial_state)
                 result["agent_report"] = final_state.get("final_report", "")
                 result["agent_observations"] = final_state.get("past_observations", [])
+                if final_state.get("causal_evidence"):
+                    result["agent_causal_evidence"] = final_state["causal_evidence"]
                 result["status"] = "agent_execution"
 
             except Exception as e:

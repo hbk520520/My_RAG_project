@@ -89,7 +89,8 @@ def _vector_recall(engine: LegalDenseGraphBuilder, query: str, k: int) -> list:
             continue
         if v["metadata"].get("status") == "tombstone":
             continue
-        hits.append({"id": int(nid), "content": v["content"], "score": float(score)})
+        hits.append({"id": int(nid), "content": v["content"], "score": float(score),
+                     "metadata": v["metadata"]})
     return hits
 
 
@@ -113,13 +114,19 @@ def _graph_expand(engine: LegalDenseGraphBuilder, seeds: list, limit: int) -> li
             seen.add(nb_id)
             # 邻居得分按一跳衰减，便于 Grader 分辨直接命中与扩展命中
             expanded.append({"id": nb_id, "content": nb["content"],
-                             "score": seed["score"] * 0.9})
+                             "score": seed["score"] * 0.9, "metadata": nb["metadata"]})
             if len(expanded) >= limit:
                 return expanded
     return expanded
 
 
 def retrieve_docs(engine: LegalDenseGraphBuilder, query: str,
+                  engine_kind: str, top_k: int) -> list:
+    """兼容原接口：调用者仍获得文档文本列表。"""
+    return [h["content"] for h in retrieve_hits(engine, query, engine_kind, top_k) if h.get("content")]
+
+
+def retrieve_hits(engine: LegalDenseGraphBuilder, query: str,
                   engine_kind: str, top_k: int) -> list:
     """
     按引擎类型检索，返回命中的文档文本列表。
@@ -151,7 +158,7 @@ def retrieve_docs(engine: LegalDenseGraphBuilder, query: str,
             logger.info(f"[{engine_kind}] 向量召回 {len(hits)} 条，图游走扩展 {len(extra)} 条")
             hits.extend(extra)
 
-    return [h["content"] for h in hits if h.get("content")]
+    return hits
 
 
 # ============================================================================
@@ -215,17 +222,23 @@ def main():
                     engine_kind = "GLOBAL_DENSE_WORMHOLE"
 
             logger.info(f"Retriever [{engine_kind}]: {actual_query[:60]}")
-            docs = retrieve_docs(engine, actual_query, engine_kind, top_k)
+            hits = retrieve_hits(engine, actual_query, engine_kind, top_k)
+            docs = [h["content"] for h in hits if h.get("content")]
 
             # 关键：只追加 observation，**不动 task_queue**。
             # Grader 用 task_queue[0] 取当前任务、past_observations[-1] 取资料，
             # 两者必须指向同一个任务；在这里 pop 会造成评估对象错位。
-            state.setdefault("past_observations", []).append({
+            observation = {
                 "task": actual_query,
                 "engine": engine_kind,
                 "docs": docs,
                 "retriever_status": "ok" if docs else "empty",
-            })
+            }
+            if cfg.get("causal_evidence", "enabled", default=False):
+                from causal_evidence.pipeline import evidence_from_hit
+                observation["evidence_records"] = [evidence_from_hit(h).model_dump(mode="json")
+                                                   for h in hits if h.get("content")]
+            state.setdefault("past_observations", []).append(observation)
 
             state_manager.save_state(session_id, state)
             producer.send(TOPIC_GRADER_PENDING, key=session_id,

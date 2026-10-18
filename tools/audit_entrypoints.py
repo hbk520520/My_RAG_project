@@ -146,6 +146,12 @@ REGISTRY: list[EntryPoint] = [
     EntryPoint("asynchronization/workers/reasoner_worker.py", "reasoner_worker", "ok",
                "needs:Kafka + Redis + LLM API Key + Docker 沙箱"),
 
+    # ---------------- causal evidence ----------------
+    EntryPoint("causal_evidence/pipeline.py", "causal_evidence.pipeline", "ok", "no-main",
+               "LLM 提取/验证与 CTVF；导入不连接服务或下载分词词表"),
+    EntryPoint("tools/calibrate_causal_support.py", "tools.calibrate_causal_support", "ok",
+               "needs:标注 JSONL 和输出路径"),
+
     # ---------------- benchmark_causal ----------------
     EntryPoint("benchmark_causal/schemas.py", "benchmark_causal.schemas", "ok", "no-main"),
     EntryPoint("benchmark_causal/scm.py", "benchmark_causal.scm", "ok", "no-main",

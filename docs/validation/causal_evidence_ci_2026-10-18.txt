@@ -1,0 +1,40 @@
+========================================================================
+  一键回归 —— 导入安全 + compileall + pytest + 离线 demo + P0 spike
+  解释器: D:\project(now)\.venv\Scripts\python.exe
+  工作目录: D:\project(now)
+========================================================================
+
+[1/5] 入口点导入安全性
+------------------------------------------------------------------------
+✅ audit: entrypoint imports  (10.6s)
+
+[2/5] 语法编译检查
+------------------------------------------------------------------------
+✅ compileall  (1.4s)
+
+[3/5] 测试套件
+------------------------------------------------------------------------
+✅ pytest  (6.7s)
+
+[4/5] 离线端到端 demo（每个子系统的 __main__ 真跑一遍）
+------------------------------------------------------------------------
+✅ demo: 图引擎（BGE-M3 + FAISS + igraph）  [dataset/graph.py]  (0.4s)
+✅ demo: 记忆↔图 桥接（双写/脏同步/tombstone）  [dataset/memory_graph_bridge.py]  (2.3s)
+✅ demo: 增量记忆（GMM 动态阈值）  [dataset/IncrementalMemoryManager.py]  (2.2s)
+✅ demo: Agent 状态机（LangGraph 全图）  [multiple-search/soul.py]  (2.4s)
+✅ demo: 因果评测沙盘（合法语料 + SCM）  [benchmark_causal/run_demo.py]  (0.3s)
+✅ demo: 沙箱工具返回契约（成功/失败/清理）  [multiple-search/legal_sandbox/example_usage.py]  (0.4s)
+
+[5/5] P0 spike：LangGraph 检查点 / 跨进程恢复
+------------------------------------------------------------------------
+✅ spike: checkpoint & resume  (9.0s)
+
+汇总
+------------------------------------------------------------------------
+  ✅ 通过   entrypoint imports
+  ✅ 通过   compileall
+  ✅ 通过   pytest
+  ✅ 通过   offline demos
+  ✅ 通过   P0 spike
+
+结论：✅ 全绿

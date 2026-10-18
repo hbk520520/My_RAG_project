@@ -295,3 +295,12 @@ def test_invalid_graph_reference_is_rejected():
     graph["causal_edges"][0]["hyperedge_id"] = "missing"
     with pytest.raises(ValidationError, match="hyperedge"):
         CausalTemporalGraph.model_validate(graph)
+
+
+def test_hallucinated_proposition_with_real_entities_is_rejected():
+    data = payload()
+    data["propositions"][0]["sentence"] = "预算削减导致资金紧张以及未提及的破产"
+    _, edges, rejected = extract_verified(one_chunk(), ScriptedCalls(data))
+    assert not edges
+    assert rejected[0].reason == "ungrounded_proposition_quote"
+    assert rejected[-1].candidate.strength == 0.9

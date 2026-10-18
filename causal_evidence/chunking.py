@@ -65,6 +65,7 @@ def chunk_record(record: EvidenceRecord, *, chunk_size: int = 512,
         text = record.text[left:right]
         chunks.append(TextChunk(
             chunk_id=f"{record.record_id}:{start}:{end}", record_id=record.record_id,
+            source_id=record.source_id,
             text=text, char_start=left, char_end=right, token_start=start, token_end=end,
             timestamp=record.timestamp or parse_timestamp(text),
             available_at=record.available_at, availability_verified=record.availability_verified,

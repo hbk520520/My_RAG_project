@@ -94,6 +94,19 @@ cache:
   engine: "redis"          # "redis" 或 "memory"
   index_name: "legal_semantic_cache"
 
+# --- 因果证据：检索后、Grader 前；默认关闭以保持旧行为 ---
+causal_evidence:
+  enabled: false
+  calibration_path: null       # 人工标注拟合的 JSON；null 明确表示未校准
+  prediction_cutoff: null      # YYYY-MM-DD；预测时必须显式指定
+  targets: null                # 优先明确填写目标实体列表；null 只作问题内精确匹配
+  d_max: 3
+  eta: 5.0
+  missing_time_validity: 0.25
+  max_chains: 200
+  max_expansions: 10000
+  min_score: 0.005
+
 # --- 沙箱 ---
 sandbox:
   image: "legal-sandbox:v1"

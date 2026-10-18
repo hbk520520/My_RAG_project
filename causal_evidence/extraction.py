@@ -23,12 +23,14 @@ def extract_verified(chunk: TextChunk, call, calibrator: SupportCalibrator | Non
     for index, proposition in enumerate(extracted.propositions):
         names = [entity.name for entity in proposition.entities]
         if (proposition.evidence_quote not in chunk.text
+                or proposition.sentence not in proposition.evidence_quote
                 or any(name not in proposition.evidence_quote for name in names)):
             rejections.append(Rejection(chunk_id=chunk.chunk_id, proposition_index=index,
                                         reason="ungrounded_proposition_quote"))
             continue
         edge = Hyperedge(
             id=f"{chunk.chunk_id}:p{index}", chunk_id=chunk.chunk_id, record_id=chunk.record_id,
+            source_id=chunk.source_id,
             proposition=proposition.sentence, entities=sorted({canonical(n) for n in names}),
             evidence_quote=proposition.evidence_quote, timestamp=chunk.timestamp,
             available_at=chunk.available_at, availability_verified=chunk.availability_verified,
@@ -49,7 +51,8 @@ def extract_verified(chunk: TextChunk, call, calibrator: SupportCalibrator | Non
               or relation.effect not in relation.evidence_quote):
             reason = "ungrounded_relation_quote"
         if reason:
-            rejections.append(Rejection(chunk_id=chunk.chunk_id, candidate_index=index, reason=reason))
+            rejections.append(Rejection(chunk_id=chunk.chunk_id, candidate_index=index,
+                                        candidate=relation, reason=reason))
         else:
             candidates.append((index, relation))
     if not candidates:
@@ -79,5 +82,6 @@ def extract_verified(chunk: TextChunk, call, calibrator: SupportCalibrator | Non
                 evidence_quote=verdict.evidence_quote, verification_reason=verdict.rationale,
             ))
             continue
-        rejections.append(Rejection(chunk_id=chunk.chunk_id, candidate_index=index, reason=reason))
+        rejections.append(Rejection(chunk_id=chunk.chunk_id, candidate_index=index,
+                                    candidate=relation, reason=reason))
     return hyperedges, edges, rejections

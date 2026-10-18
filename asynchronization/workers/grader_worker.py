@@ -67,6 +67,24 @@ def call_grader_llm(task_desc: str, docs: str) -> dict:
         return {"status": "irrelevant", "rationale": f"Grader 调用异常: {str(e)}"}
 
 
+def prepare_grader_evidence(state: dict, task_desc: str, last_obs: dict, call=None):
+    """Both grading paths use the same verified graph and cutoff policy."""
+    docs = last_obs.get("docs", [])
+    text = "\n---\n".join(docs) if isinstance(docs, list) else str(docs)
+    if not cfg.get("causal_evidence", "enabled", default=False):
+        return text, None
+    from causal_evidence.models import EvidenceRecord
+    from causal_evidence.pipeline import analyze_configured
+    if "evidence_records" not in last_obs:
+        raise ValueError("Causal mode requires evidence_records; rerun retrieval for this session")
+    analysis = analyze_configured(
+        [EvidenceRecord.model_validate(r) for r in last_obs["evidence_records"]],
+        state.get("user_query", task_desc), call,
+        prediction_cutoff=state.get("prediction_cutoff"), targets=state.get("causal_targets"),
+    )
+    return analysis["context"], analysis
+
+
 def main():
     consumer = create_consumer(
         TOPIC_GRADER_PENDING, GROUP_GRADER,
@@ -118,15 +136,21 @@ def main():
             # 获取最近一次检索的文档
             last_obs = past_observations[-1] if past_observations else {}
             docs = last_obs.get("docs", [])
-            docs_text = "\n---\n".join(docs) if isinstance(docs, list) else str(docs)
+            docs_text, causal_analysis = prepare_grader_evidence(state, task_desc, last_obs)
+            if causal_analysis is not None:
+                docs = docs_text
 
             # 调用 Grader 评估
-            grade_result = call_grader_llm(task_desc, docs_text)
+            grade_result = (call_grader_llm(task_desc, docs_text)
+                            if causal_analysis is None or docs_text else
+                            {"status": "irrelevant", "extracted_facts": [],
+                             "missing_info": "No evidence admitted before prediction cutoff"})
             status = grade_result.get("status", "irrelevant")
             extracted_facts = grade_result.get("extracted_facts", [])
             missing_info = grade_result.get("missing_info", "")
 
             logger.info(f"Session {session_id}: Grader 评估 [{task_desc}] -> {status}")
+            causal_fields = {"causal_evidence": causal_analysis} if causal_analysis is not None else {}
 
             # 更新状态
             retry_context = state.get("retry_context", {})
@@ -135,6 +159,7 @@ def main():
 
             if status == "sufficient":
                 observation = {
+                    **causal_fields,
                     "task": task_desc,
                     "engine": engine,
                     "docs": docs,
@@ -154,6 +179,7 @@ def main():
             elif status == "partial":
                 retry_context["fail_count"] += 1
                 observation = {
+                    **causal_fields,
                     "task": task_desc,
                     "engine": engine,
                     "docs": docs,
@@ -188,6 +214,7 @@ def main():
             else:  # irrelevant
                 retry_context["fail_count"] += 1
                 observation = {
+                    **causal_fields,
                     "task": task_desc,
                     "engine": engine,
                     "docs": docs,

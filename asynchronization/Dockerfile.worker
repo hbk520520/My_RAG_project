@@ -19,6 +19,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY config.yaml config_loader.py prompts.py double_layer_plan.py observability.py ./
 # 异步编排层（含 entrypoint.sh 与 workers/）
 COPY asynchronization/ asynchronization/
+# Worker 的因果证据及既有检索/沙箱导入均需随镜像交付。
+COPY causal_evidence/ causal_evidence/
+COPY dataset/*.py dataset/
+COPY replanner_rules.py ./
+COPY multiple-search/legal_sandbox/ multiple-search/legal_sandbox/
 RUN chmod +x asynchronization/entrypoint.sh
 
 # 说明：这里暂以 root 运行，因为沙箱调度需要挂载 docker.sock。

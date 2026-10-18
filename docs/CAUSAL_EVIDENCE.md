@@ -16,7 +16,8 @@ Hithink research、Nanyang Technological University。这里依据论文署名�
 `graph.py::build_graph(records, call, cutoff=..., calibrator=..., extractor_id=...)` 的 `call(messages)`
 接收消息列表并返回 JSON 字符串，可注入现有 LLM 接缝；不自行建立网络客户端。
 512/64 基于 `cl100k_base` 的全篇 token 索引。多字节 Unicode 边界处向内对齐，实际 overlap 可能小于 64。
-原文字符偏移、chunk_id、record_id、命题、引句、验证理由均保留。
+原文字符偏移、chunk_id、record_id、可选 source_id、命题、引句、验证理由均保留。
+被拒绝的候选也保留原始字段和拒绝理由，支持后续错误分析。
 额外的 `evidence_quote`、`proposition_index` 是本项目的审计契约，不声称是论文原始 JSON 字段。
 
 `score_graph(graph, targets, cutoff)` 先筛选有效证据，再反向 BFS；按原文公式计算重复支持项、
@@ -32,7 +33,32 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 
 规范化只做 Unicode NFKC、大小写和空白处理，不猜测同义实体。
 同一 record_id 的重叠块不算多次支持，同一来源的重复命题也不重复参与端点平均。
-不同 record_id 不等于独立来源；转载稿应在输入阶段使用共同 source/record 标识，否则仍可能高估重复支持。
+转载稿可使用不同 record_id，但应设置共同 source_id；未提供 source_id 时按 record_id 计数，
+不同 record_id 不等于独立来源，仍可能高估重复支持。
+
+## 两条执行链的启用方式
+
+`config.yaml` 中设置 `causal_evidence.enabled: true`。提取和验证都复用已有
+`llm.judge_model`（不强制切换为论文的 GPT-4o-mini）；校准标识是 `<judge_model>:causal-v1`。
+每个块一次提取，有通过原文检查的候选才额外一次独立验证请求。验证器仍可能和提取器犯相同错误。
+检查新配置不会自动发起 LLM 请求；执行启用后的任务才会使用现有 API 配置。
+
+同步入口保持单参数接口兼容，并支持：
+
+```python
+router.process("预算削减是否导致资金紧张？",
+               prediction_cutoff="2025-10-01", causal_targets=["资金紧张"])
+```
+
+调用方仍需为检索图注入语料。节点 metadata 可提供 `record_id`、`source_id`、`timestamp`、
+`available_at`、`availability_verified`、`similarity`；FAISS 内积和图游走衰减分不冒充存储的语义相似度。
+`prediction_cutoff`、`causal_targets` 可以放入 Kafka 会话状态，也可以在配置中提供默认值。
+启用的旧会话若已越过 Retriever 且缺少来源记录，需重新检索；不静默伪造元数据。
+截止日过滤在提取前执行，Grader、Reasoner 和最终报告接收同一份可用原文及因果权重。
+无目标时报告 `no_target_anchor`，全部过滤时报告 `no_admitted_evidence`，不伪造权重。
+启用时绕过旧答案缓存，避免没有时间边界的答案泄漏未来信息；不全局删除缓存。
+
+本次只采用 CHAIN 的图构建和数据权重，不包含 Noisy-OR、概率融合及其他预测模块。
 
 ## 支持度校准
 
@@ -65,7 +91,8 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 分词词表首次使用需预先缓存；测试用注入分词器保持离线，并另行实测真实词表的 Unicode 分块。
 生产镜像原有 Python 3.10 尚需独立验证；本次不升级整个项目依赖。
 
-当前全量 370 项测试通过。测试使用脚本化模型响应；覆盖工程行为，**不是提取准确率实验**。
+阶段一全量 370 项测试通过；最终集成检查结果在下方维护。测试使用脚本化模型响应；
+覆盖工程行为，**不是提取准确率实验**。
 尚无人工标注语料，没有拟合上线校准器，没有实测真实 LLM 的因果边精确率或下游预测收益。
 独立验证调用也可能重复提取模型的错误，必须用人工标签评估。
 
@@ -76,3 +103,28 @@ LLM 不能自行授予此资格。已知的晚发布日期优先阻止信息进�
 
 相较论文，本项目**在实现上更进一步**：把原文可追溯验证、非因果拒绝、独立标注校准、
 来源隔离评估作为显式组件。是否在实验效果上优于论文，仍需上述对照与消融，当前不能下结论。
+
+## 最终工程验证（2026-10-18）
+
+- 全量 `pytest`：388 项通过（原有 325 项 + 新增 63 项）；既有 SQLite 测试有未关闭连接的 ResourceWarning。
+- `python tools/ci.py`：五类检查全部通过，包含新模块入口导入、compileall、pytest、6 个离线 demo、跨进程恢复实验。
+- 分词实测：cl100k_base 处理含中文和 emoji 的长文本，块最大 512 tokens，未引入替换字符。
+- `git diff --check`：通过。
+- 未执行真实 LLM/API 准确率评测、Kafka/Redis 服务集成、Docker 镜像构建或 Python 3.10 运行验证；本机没有 Docker CLI。
+
+Windows 复现命令（PowerShell，在已安装依赖的项目根目录）：
+
+```powershell
+New-Item -ItemType Directory -Path outputs/temp -Force | Out-Null
+$env:TEMP = Join-Path (Get-Location) 'outputs/temp'
+$env:TMP = $env:TEMP
+$env:OMP_NUM_THREADS = '1'
+$env:PYTEST_ADDOPTS = '-o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-ci'
+.\.venv\Scripts\python.exe tools/ci.py
+```
+
+先前失败记录：初次 pytest 因系统临时目录/原有缓存权限错误，改用项目内目录后通过。
+首次完整 CI 的 query 导入因系统 PyTorch Python 文件与二进制不匹配失败，sandbox_server 缺少 FastAPI。
+仅在 `.venv` 补齐 FastAPI/uvicorn 并重装同版本 torch 2.10.0 后，入口检查通过；没有为此修改业务代码。
+一条集成测试还发现“证据全部被过滤、配置目标实体不存在”的异常，现已改为明确报告无可用证据。
+原始最终 CI 输出见 [validation/causal_evidence_ci_2026-10-18.txt](validation/causal_evidence_ci_2026-10-18.txt)。

@@ -67,7 +67,7 @@ OFFLINE_DEMOS = [
 #     它的整条链路（扫描→分块→向量化→落盘）由 tests/test_corpus_ingest.py 覆盖。
 
 COMPILE_EXCLUDE = (".git", "__pycache__", ".pytest_cache", "saved_loras",
-                   "RAG_data", "training_data", "outputs", ".continue")
+                   "RAG_data", "training_data", "outputs", ".continue", ".venv", "venv")
 
 TAIL_LINES = 25
 

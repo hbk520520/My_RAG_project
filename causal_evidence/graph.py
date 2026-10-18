@@ -33,6 +33,7 @@ def build_graph(records: list[EvidenceRecord], call, *, cutoff: date | None = No
         for chunk in chunk_record(record, encoding=encoding):
             if cutoff is not None and not admissible(chunk, cutoff):
                 continue
+            graph.source_chunks.append(chunk)
             hyperedges, edges, rejected = extract_verified(chunk, call, calibrator)
             graph.hyperedges.extend(hyperedges)
             graph.causal_edges.extend(edges)
@@ -47,6 +48,7 @@ def active_graph(graph: CausalTemporalGraph, cutoff: date) -> CausalTemporalGrap
     return CausalTemporalGraph(
         entities=sorted({v for h in hyperedges for v in h.entities}), hyperedges=hyperedges,
         causal_edges=[c for c in graph.causal_edges if c.hyperedge_id in ids],
+        source_chunks=[c for c in graph.source_chunks if admissible(c, cutoff)],
         rejections=graph.rejections, calibration_status=graph.calibration_status,
     )
 
@@ -81,7 +83,7 @@ def score_graph(graph: CausalTemporalGraph, targets: list[str], cutoff: date, *,
     distances = reverse_distances(active, targets)
     recurrence = defaultdict(set)
     for edge in active.hyperedges:
-        recurrence[canonical(edge.proposition)].add(edge.record_id)
+        recurrence[canonical(edge.proposition)].add(edge.source_id or edge.record_id)
     hyperedge_scores = {}
     incident = defaultdict(dict)
     for edge in active.hyperedges:
@@ -102,7 +104,7 @@ def score_graph(graph: CausalTemporalGraph, targets: list[str], cutoff: date, *,
                                     "recency": recency, "salience": salience,
                                     "support_records": count, "validity": validity}
         # Overlapping chunks of the same source/fact are a single contribution.
-        fact_key = (edge.record_id, canonical(edge.proposition))
+        fact_key = (edge.source_id or edge.record_id, canonical(edge.proposition))
         for entity in edge.entities:
             previous = incident[entity].get(fact_key)
             incident[entity][fact_key] = validity if previous is None else min(previous, validity)

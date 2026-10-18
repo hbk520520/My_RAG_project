@@ -1,0 +1,2 @@
+# Container entrypoints must remain executable shell text on Windows checkouts.
+asynchronization/entrypoint.sh text eol=lf
