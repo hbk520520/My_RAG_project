@@ -135,6 +135,9 @@ causal_evidence:
 
 # --- 沙箱 ---
 sandbox:
+  # docker 是默认后端。设为 space 时必须完整配置下面的 space 段；
+  # 配置无效会明确报错，不会自动回退到 Docker 或宿主机执行。
+  backend: "docker"            # docker | space
   image: "legal-sandbox:v2"
   max_output_bytes: 65536
   mem_limit: "512m"
@@ -143,6 +146,44 @@ sandbox:
   execution_timeout: 10
   max_retries: 3
   idle_cleanup_seconds: 600
+
+  # --- 可选 SPACE 远程后端（默认关闭；首期仅一次性 Python 执行）---
+  # 适配的接口契约：native /v1 M1，上游提交 57c7c0c4（见 docs/SANDBOX_BACKENDS.md）。
+  # 模板必须是不可变摘要引用：<name>@sha256:<12-64 位小写十六进制>；
+  # 部署应提供完整 64 位 digest。见 docs/SANDBOX_BACKENDS.md。
+  space:
+    enabled: false
+    api_url: "${SPACE_API_URL}"
+    data_plane_url: "${SPACE_DATA_PLANE_URL}"
+    api_token: "${SPACE_API_TOKEN}"
+    template: "${SPACE_TEMPLATE}"
+    runtime: "fc"
+    api_contract: "m1"
+    # 显式 SPACE 单位，绝不从 Docker cpu_quota/mem_limit 推导。
+    vcpu: 1
+    memory_mib: 512
+    disk_mib: 1024
+    connect_timeout: 5
+    request_timeout: 30
+    operation_timeout: 60
+    stream_timeout: 45
+    command_timeout: 10
+    poll_interval: 1
+    max_total_seconds: 120
+    idle_timeout: 600
+    max_output_bytes: 65536
+    max_stderr_bytes: 16384
+    max_frame_bytes: 1048576
+    max_stream_bytes: 4194304
+    max_request_bytes: 262144
+    idempotency_window_seconds: 86400
+    # 仅记录“已在某个具体部署上核对过”的证据指针；不是运行时证明。
+    # 空值会让 space 后端明确拒绝启用。
+    network_isolation:
+      mode: "egress_deny_all"
+      verified_deployment: ""
+      verified_at: ""
+      evidence: ""
 
 # --- 智能体 ---
 agent:

@@ -1,0 +1,101 @@
+Sandbox SPACE backend — local validation record
+Historical result: this record predates the subsequent cache/cleanup/deadline/
+output-limit optimizations. Those changes have NOT been tested at the user's
+request; the results below must not be presented as their validation.
+Date: 2026-10-19
+Project HEAD: bbb67211b02deef1c34387835bc9fa974f1cd048 (main)
+Interpreter: D:\project(now)\.venv\Scripts\python.exe (Python 3.13.9)
+Platform: Windows, PowerShell, project and pytest temp/cache on D:
+
+Scope of this record
+--------------------
+This record covers offline unit/integration tests using an injected HTTP
+transport and a real local SQLite run store. It does NOT cover a real SPACE
+deployment, KVM, egress enforcement, real templates, credential rotation
+against a live service, or performance measurements.
+
+Upstream contract checked
+-------------------------
+- git ls-remote https://github.com/perplexityai/SPACE.git HEAD
+  -> 57c7c0c47a73373a974c5b542d180599795465da
+- Read docs/versioning.md, docs/api/index.md, docs/first-sandbox.md,
+  examples/first_sandbox.py, docs/native-api-hardening.md,
+  docs/egress-profiles.md and the public API request/response models from a
+  shallow clone of that commit.
+- The adapter targets the native /v1 M1 surface. It does not use the Rust
+  workspace, a Python SPACE SDK, the ECW/E2B surface or WebSocket attach.
+- No real template digest is pinned in the repository: SPACE_TEMPLATE is a
+  deployment input and must be an immutable name@sha256:<12-64 hex> reference
+  (a full 64-character digest is recommended).
+
+Commands and results
+--------------------
+1) SPACE test inventory
+   .\.venv\Scripts\python.exe -m pytest -o addopts="" --collect-only -q tests/test_space_sandbox.py
+   Result: 44 tests collected
+
+2) Full suite
+   .\.venv\Scripts\python.exe -m pytest -o addopts="" -q --basetemp=outputs/pytest-run-full-check7
+   Result: 607 passed, 7 warnings in 49.24s (exit code 0)
+
+3) Project CI entry point
+   .\tools\run.ps1 ci
+   Result: all five checks green (exit code 0)
+     - entrypoint imports: 11.7s
+     - compileall: 2.1s
+     - pytest: 51.7s
+     - offline demos: 7 demos passed (agent_runtime, graph, memory bridge,
+       incremental memory, soul workflow, causal benchmark, sandbox example)
+     - P0 checkpoint/resume spike: 9.3s
+
+Warnings observed (not failures)
+--------------------------------
+- tests/test_long_term_memory.py::test_memory_survives_another_process:
+  PytestUnhandledThreadExceptionWarning from a subprocess reader decoding a
+  non-UTF-8 byte; the test itself passed.
+- tests/test_memory_thresholds.py: sklearn KMeans MKL memory-leak warning on
+  Windows. Pre-existing, unrelated to the sandbox changes.
+
+SPACE-specific offline coverage (tests/test_space_sandbox.py, 44 tests)
+----------------------------------------------------------------------
+- Default Docker backend and explicit invalid-backend rejection.
+- Disabled/invalid SPACE configuration fails without fallback.
+- Digest-pinned template and network-isolation verification-record checks.
+- Explicit SPACE vCPU/memory/disk units, no Docker quota reinterpretation.
+- Normal create -> operation -> running -> process-ready -> command -> SSE ->
+  exit -> delete lifecycle.
+- stdout fallback, multiline/fragmented SSE, code exception, nonzero exit,
+  create failure, readiness timeout, output limit.
+- Missing exit event, error/resync frames, corrupt frames, stream interruption.
+- Partial create response with a known sandbox id still cleans up; command
+  responses naming another sandbox and exit events naming another process are
+  rejected.
+- Attachment requires authorization_header transport and a valid, unexpired
+  expiry; malformed or expired attachments fail closed.
+- Cleanup failure does not overwrite a successful result; unknown handle does
+  not delete another task's sandbox; cleanup from another run is refused.
+- A SPACE handle is one-shot: a second command is refused instead of sharing a
+  guest workspace.
+- Real SQLite effects ledger: original idempotency key/method/path/body survive
+  a lost create/command response; create/command/delete intents remain after a
+  successful run; the response update does not extend the idempotency window;
+  tokens are absent; retry is blocked.
+- Cancellation rejects a late result while independent cleanup still runs.
+- Epoch change rejects reuse of an old handle; task/project ownership checks
+  protect cleanup.
+- Idempotency-window expiry, deployment/API-origin/template mismatch and
+  changed method/path/body are rejected; token rotation does not change the run
+  pin identity.
+- Embedded runner contract executed locally through Python subprocess.
+- Standard-library transport reads a loopback response and does not follow a
+  302 redirect.
+
+Not performed
+-------------
+- No real SPACE API/data-plane call, template resolution, KVM execution, or
+  egress-profile verification.
+- No deployment, database migration, dependency upgrade or external service
+  mutation.
+- No lint or type-check command: this repository does not define a separate lint
+  or static type-check configuration.
+- No performance baseline or claim of latency/resource improvement.

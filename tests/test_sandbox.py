@@ -223,6 +223,19 @@ def test_run_code_once_fails_closed_when_manager_unavailable(monkeypatch):
     monkeypatch.setattr(sandbox_exec, "run_in_process", lambda code: pytest.fail("Host execution is forbidden"))
     result = sandbox_exec.run_code_once("result = 42")
     assert result["calc_result"] is None and "unavailable" in result["error"]
+    assert result["error_kind"] == "unavailable"
+
+
+def test_run_code_once_reports_invalid_backend_configuration_without_fallback(monkeypatch):
+    from agent_tools.sandbox.errors import SandboxConfigError
+
+    def fail():
+        raise SandboxConfigError("sandbox.backend is invalid")
+    monkeypatch.setattr(sandbox_exec, "get_sandbox_manager", fail)
+    result = sandbox_exec.run_code_once("result = 42")
+    assert result["calc_result"] is None
+    assert result["error_kind"] == "configuration"
+    assert "sandbox.backend" in result["error"]
 
 
 def test_run_code_once_fails_closed_when_execute_raises(monkeypatch):
@@ -241,21 +254,21 @@ def test_run_code_once_fails_closed_when_start_raises():
 # 3. destroy_session —— 幂等 + 失败不上抛
 # ============================================================================
 def test_destroy_session_is_noop_for_empty_id():
-    sandbox_exec.destroy_session(None)
-    sandbox_exec.destroy_session("")
+    assert sandbox_exec.destroy_session(None) is True
+    assert sandbox_exec.destroy_session("") is True
 
 
-def test_destroy_session_swallows_manager_errors(monkeypatch):
+def test_destroy_session_swallows_manager_errors():
     class _Bad(FakeManager):
         def destroy_session(self, session_id):
             raise RuntimeError("清理失败")
 
-    sandbox_exec.destroy_session("sandbox_x", manager=_Bad())
+    assert sandbox_exec.destroy_session("sandbox_x", manager=_Bad()) is False
 
 
 def test_destroy_session_delegates_to_manager():
     fake = FakeManager()
-    sandbox_exec.destroy_session("sandbox_abc", manager=fake)
+    assert sandbox_exec.destroy_session("sandbox_abc", manager=fake) is True
     assert fake.destroyed == "sandbox_abc"
 
 

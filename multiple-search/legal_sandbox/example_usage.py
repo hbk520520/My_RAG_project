@@ -66,20 +66,25 @@ def node_execute_code(state: Dict[str, Any], runner=None) -> Dict[str, Any]:
 
     走 `run_code_once()` 统一入口，返回契约见 `docs/CONTRACTS.md` 契约 7：
         {"calc_result": str|None, "error": str|None,
-         "session_id": str|None, "via": "docker"|"local"|None}
+         "session_id": str|None, "via": "docker"|"space"|"local"|None}
     """
     code = state.get("generated_code", "")
     hop = state.get("current_hop", 0)
 
     outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
     state["sandbox_session_id"] = outcome["session_id"]
+    if outcome.get("cleanup_error"):
+        logger.error("沙箱清理未获证明: %s", outcome["cleanup_error"])
 
     if outcome["error"]:
         logger.warning(f"沙箱报错（via={outcome['via']}）: {outcome['error']}")
         state.setdefault("current_context", []).append({
             "hop": hop, "status": "error", "data": outcome["error"],
         })
-        state["next_action"] = "write_code"      # 打回重写
+        if outcome.get("error_kind") in ("configuration", "unavailable"):
+            state["next_action"] = "terminate"   # 后端不可用时不改写代码
+        else:
+            state["next_action"] = "write_code"  # 打回重写
     else:
         logger.info(f"[Hop {hop}] 沙箱执行成功（via={outcome['via']}）")
         state.setdefault("current_context", []).append({
@@ -92,8 +97,7 @@ def node_execute_code(state: Dict[str, Any], runner=None) -> Dict[str, Any]:
 def terminate_session(state: Dict[str, Any]) -> Dict[str, Any]:
     """在对话结束或异常时清理沙箱（幂等）"""
     session_id = state.get("sandbox_session_id")
-    if session_id:
-        destroy_session(session_id)
+    if session_id and destroy_session(session_id):
         state["sandbox_session_id"] = None
     return state
 

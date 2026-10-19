@@ -141,7 +141,10 @@ def run_calc_with_sandbox(user_query: str, reasoning_chain: list,
 
     阶段 5：Reasoner Worker 原先只设置 needs_sandbox_calc=True 却**没有任何消费方**，
     金额计算环节在 Kafka 链路里是断的。现在直接内联调用沙箱，
-    复用 sandbox_exec.run_code_once（Docker 优先，不可用时降级本进程）。
+    复用 sandbox_exec.run_code_once（后端由配置选择，默认 Docker）。
+
+    注意：SPACE 后端的 OutcomeUnknown 会直接向上抛出，不会在本循环里
+    自动重写代码或再次执行。
 
     :return: (计算明细文本, 沙箱 session_id)
     """
@@ -156,10 +159,17 @@ def run_calc_with_sandbox(user_query: str, reasoning_chain: list,
 
         outcome = run_code_once(code, session_id=session_id)
         session_id = outcome.get("session_id") or session_id
+        if outcome.get("cleanup_error"):
+            logger.error("沙箱清理未获证明: %s", outcome["cleanup_error"])
 
         if not outcome["error"]:
             logger.info(f"沙箱执行成功（via={outcome['via']}，第 {attempt} 次尝试）")
             return str(outcome["calc_result"]), session_id
+
+        if outcome.get("error_kind") in ("configuration", "unavailable"):
+            # Backend configuration is not a code error. Stop instead of
+            # generating a new program for the same unavailable backend.
+            raise RuntimeError(f"沙箱后端不可用: {outcome['error']}")
 
         logger.warning(f"沙箱第 {attempt}/{max_retries} 次执行失败: "
                        f"{str(outcome['error'])[:200]}")
@@ -259,8 +269,11 @@ def main():
 
             # ---- 清理沙箱资源（幂等，清理失败不影响主流程）----
             if state.get("sandbox_session_id"):
-                destroy_sandbox_session(state["sandbox_session_id"])
-                state["sandbox_session_id"] = None
+                if destroy_sandbox_session(state["sandbox_session_id"]):
+                    state["sandbox_session_id"] = None
+                else:
+                    logger.error("沙箱清理未获确认，保留 session_id=%s 以便追踪",
+                                 state["sandbox_session_id"])
 
             # 更新状态
             state["reasoning_chain"] = reasoning_chain

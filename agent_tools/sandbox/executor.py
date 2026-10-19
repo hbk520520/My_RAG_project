@@ -1,6 +1,8 @@
-"""Docker-only online execution. run_in_process is an explicitly injected test helper.
+"""Bounded code execution. Docker is the default; SPACE is opt-in.
 
-Container calculations are stateless. No tool automatically executes code on the host.
+Container/remote calculations are stateless from this project's point of view.
+No online tool executes code on the host. ``run_in_process`` remains an explicit
+offline test helper and is not a security boundary.
 """
 import io
 import os
@@ -9,7 +11,9 @@ import traceback
 import logging
 from typing import Any, Dict, Optional
 
-from .manager import DockerSandboxManager, get_sandbox_manager
+from .errors import (SandboxConfigError, SandboxError, SandboxOutcomeUnknown,
+                     SandboxUnavailableError)
+from .manager import DockerSandboxManager, get_sandbox_manager, sandbox_backend
 
 logger = logging.getLogger("SandboxExec")
 
@@ -77,40 +81,125 @@ def run_in_process(code: str) -> Dict[str, Any]:
 def run_code_once(code, session_id=None, manager=None):
     from docker.errors import DockerException
     from agent_runtime.context import current_run, tool_call
+    from agent_runtime.contracts import (BudgetExceeded, OutcomeUnknown, RunConflict,
+                                         RunStopped)
     if not code or not code.strip():
         return {"calc_result": None, "error": "没有可执行的代码", "session_id": session_id, "via": None}
     if len(code.encode("utf-8")) > 65536:
         return {"calc_result": None, "error": "Code input limit exceeded", "session_id": session_id, "via": None}
+
+    # Selecting a policy is local; constructing a manager may contact Docker.
+    # Leave construction inside the tool body so cached results stay usable
+    # even when the selected execution service is unavailable.
+    try:
+        backend = getattr(manager, "via", "docker") if manager is not None else sandbox_backend()
+    except SandboxConfigError as exc:
+        return {"calc_result": None, "error": str(exc),
+                "session_id": session_id, "via": None,
+                "error_kind": "configuration"}
+    read_only = not getattr(manager, "side_effecting", backend == "space")
+    one_shot = bool(getattr(manager, "one_shot", backend == "space"))
+    cleanup_error = None
+    cleanup_attempted = False
+    cleanup_succeeded = False
+
+    def cleanup():
+        """Release this call's sandbox without replacing its result.
+
+        Managed executions are cleaned inside the tool body so the ledger
+        records the actual cleanup outcome alongside the calculation result.
+        """
+        nonlocal cleanup_error, cleanup_attempted, cleanup_succeeded
+        if cleanup_attempted or not session_id or manager is None:
+            return
+        cleanup_attempted = True
+        try:
+            manager.destroy_session(session_id)
+            cleanup_succeeded = True
+        except Exception as exc:
+            # Cleanup is a best-effort boundary: a failure must never replace
+            # the execution result.  It is logged with the resource handle and
+            # returned as cleanup_error.
+            cleanup_error = f"{type(exc).__name__}: {exc}"
+            logger.exception("沙箱清理失败：session_id=%s", session_id)
+
     def execute():
         nonlocal session_id, manager
+        result_outcome = None
         try:
-            manager = manager or get_sandbox_manager()
+            if manager is None:
+                try:
+                    manager = get_sandbox_manager()
+                except SandboxConfigError:
+                    raise
+                except (DockerException, OSError, RuntimeError) as exc:
+                    raise SandboxUnavailableError(str(exc)) from exc
             session_id = session_id or manager.start_session()
             result = manager.execute_code(session_id, code)
             if result.get("error"):
-                raise RuntimeError(result["error"])
+                error = RuntimeError(result["error"])
+                error.error_kind = result.get("error_kind") or "execution"
+                raise error
             value = result["output"].strip()
             if not value:
                 raise ValueError("Sandbox returned an empty result")
-            return {"calc_result": value, "error": None, "session_id": session_id, "via": "docker"}
+            result_outcome = {"calc_result": value, "error": None,
+                              "session_id": session_id,
+                              "via": backend}
         finally:
-            if current_run.get() is not None and session_id and manager:
-                manager.destroy_session(session_id)
+            if one_shot or current_run.get() is not None:
+                cleanup()
+        if cleanup_succeeded:
+            result_outcome["session_id"] = None
+        if cleanup_error:
+            result_outcome["cleanup_error"] = cleanup_error
+        return result_outcome
+
     try:
-        outcome = tool_call("sandbox.execute", {"code": code}, execute)
-    except (DockerException, OSError, RuntimeError, ValueError) as exc:
-        return {"calc_result": None, "error": str(exc), "session_id": session_id, "via": "docker"}
-    if current_run.get() is not None:
+        outcome = tool_call("sandbox.execute", {"code": code}, execute,
+                            read_only=read_only)
+    except (OutcomeUnknown, RunStopped, BudgetExceeded, RunConflict):
+        # Cancellation, epoch invalidation and ambiguous side effects must
+        # reach the service unchanged. They are not ordinary code errors.
+        raise
+    except SandboxOutcomeUnknown as exc:
+        raise OutcomeUnknown(str(exc)) from exc
+    except SandboxConfigError as exc:
+        outcome = {"calc_result": None, "error": str(exc),
+                   "session_id": session_id, "via": backend,
+                   "error_kind": "configuration"}
+    except SandboxUnavailableError as exc:
+        outcome = {"calc_result": None, "error": str(exc),
+                   "session_id": session_id, "via": backend,
+                   "error_kind": "unavailable"}
+    except (DockerException, OSError, RuntimeError, ValueError, SandboxError) as exc:
+        outcome = {"calc_result": None, "error": str(exc),
+                   "session_id": session_id, "via": backend}
+        kind = getattr(exc, "error_kind", None)
+        if kind:
+            outcome["error_kind"] = kind
+
+    if cleanup_succeeded:
         outcome["session_id"] = None
+    if cleanup_error:
+        outcome["cleanup_error"] = cleanup_error
     return outcome
 
 
-def destroy_session(session_id: Optional[str], manager: Optional[DockerSandboxManager] = None) -> None:
-    """销毁沙箱容器，释放资源（幂等）"""
+def destroy_session(session_id: Optional[str], manager: Optional[DockerSandboxManager] = None) -> bool:
+    """Destroy a sandbox resource.
+
+    Returns ``True`` only when the manager reported success.  Cleanup failures
+    are logged with the resource identifier and return ``False`` so callers do
+    not silently discard ownership of a resource that may still exist.
+    """
     if not session_id:
-        return
+        return True
     try:
         manager = manager or get_sandbox_manager()
         manager.destroy_session(session_id)
-    except Exception as e:
-        logger.warning(f"沙箱清理失败({e})，可能残留容器 {session_id}")
+        return True
+    except Exception:
+        # Best-effort cleanup boundary; never override the caller's result.
+        logger.exception("沙箱清理失败：session_id=%s，可能残留资源", session_id)
+        return False

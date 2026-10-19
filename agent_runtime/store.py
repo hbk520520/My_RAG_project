@@ -216,6 +216,19 @@ class RunStore:
                 self._enqueue(db, row, topic)
         return self.get(run_id)
 
+    @staticmethod
+    def _public_result(value):
+        """Strip side-effect bookkeeping from a cached tool result.
+
+        The ledger keeps ``_intents`` next to the tool result so a completed
+        remote mutation remains auditable.  Callers of ``begin_effect`` expect
+        the original tool result shape, not ledger metadata.
+        """
+        if isinstance(value, dict) and "_intents" in value:
+            value = dict(value)
+            value.pop("_intents", None)
+        return value
+
     def begin_effect(self, run_id, epoch, token, call_id, tool, input_hash, read_only):
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -225,7 +238,7 @@ class RunStore:
                 if row["input_hash"] != input_hash or row["tool"] != tool:
                     raise RunConflict("Call identity reused with different input")
                 if row["status"] == "done":
-                    return True, json.loads(row["result"])
+                    return True, self._public_result(json.loads(row["result"]))
                 if not row["read_only"]:
                     raise OutcomeUnknown("Interrupted write tool needs reconciliation before retry")
                 db.execute("UPDATE effects SET attempts=attempts+1,status='started' WHERE call_id=?", (call_id,))
@@ -238,9 +251,106 @@ class RunStore:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             self._active(db, run_id, epoch, token)
-            cursor = db.execute("UPDATE effects SET status=?,result=? WHERE call_id=?", (status, dumps(result), call_id))
+            row = db.execute("SELECT result FROM effects WHERE call_id=?", (call_id,)).fetchone()
+            if row is None:
+                raise RunConflict("Unknown tool call identity")
+            # Keep the original remote request alongside a successful result.
+            # Without this, the IDs/key needed for later reconciliation would
+            # disappear exactly when the command completed.  ``begin_effect``
+            # strips this private key before returning a cached result.
+            intents = []
+            if row["result"]:
+                existing = json.loads(row["result"])
+                if isinstance(existing, dict):
+                    intents = list(existing.get("_intents") or [])
+                    if existing.get("_intent"):
+                        intents.append(existing["_intent"])
+            stored = result
+            if intents and isinstance(result, dict) and "_intents" not in result:
+                stored = {**result, "_intents": intents}
+            cursor = db.execute("UPDATE effects SET status=?,result=? WHERE call_id=?", (status, dumps(stored), call_id))
             if cursor.rowcount != 1:
                 raise RunConflict("Unknown tool call identity")
+
+    def record_effect_request(self, run_id, epoch, token, call_id, record):
+        """Persist the original remote mutation before it is sent.
+
+        One tool call may perform several mutations (create sandbox, then create
+        command).  Each mutation is kept by its idempotency key; immutable
+        fields of an existing key cannot change, while later calls may add
+        resource IDs after a response arrives.
+        """
+        immutable = ("action", "idempotency_key", "method", "path", "body",
+                     "run_id", "epoch", "task_id", "revision",
+                     "backend", "api_contract", "upstream_commit", "deployment",
+                     "api_url", "data_plane_url", "template", "runner_version")
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._active(db, run_id, epoch, token)
+            row = db.execute("SELECT status,result FROM effects WHERE call_id=?", (call_id,)).fetchone()
+            if row is None:
+                raise RunConflict("Unknown tool call identity")
+            if row["status"] != "started":
+                raise RunConflict("Tool call is no longer accepting request metadata")
+            current = json.loads(row["result"]) if row["result"] else {}
+            intents = []
+            if isinstance(current, dict):
+                intents = list(current.get("_intents") or [])
+                if current.get("_intent"):
+                    intents.append(current["_intent"])
+            key = record.get("idempotency_key")
+            existing = next((item for item in intents
+                             if item.get("idempotency_key") == key), None)
+            if existing is None:
+                intents.append(dict(record))
+            else:
+                for field in immutable:
+                    if field in record:
+                        if field in existing and existing[field] != record[field]:
+                            raise RunConflict(
+                                "Tool request identity changed after it was recorded")
+                        existing.setdefault(field, record[field])
+                for field, value in record.items():
+                    if field == "created_at":
+                        # The first attempt timestamp defines the idempotency
+                        # window; a response update must not extend it.
+                        continue
+                    if field not in immutable:
+                        existing[field] = value
+            cursor = db.execute("UPDATE effects SET result=? WHERE call_id=? AND status='started'",
+                                (dumps({"_intents": intents}), call_id))
+            if cursor.rowcount != 1:
+                raise RunConflict("Tool call is no longer accepting request metadata")
+
+    def effect_intents(self, call_id):
+        with self.connection() as db:
+            row = db.execute("SELECT result FROM effects WHERE call_id=?", (call_id,)).fetchone()
+            if row is None or not row["result"]:
+                return []
+            value = json.loads(row["result"])
+            if not isinstance(value, dict):
+                return []
+            intents = list(value.get("_intents") or [])
+            if value.get("_intent"):
+                intents.append(value["_intent"])
+            return intents
+
+    def effect_intent(self, call_id, idempotency_key=None):
+        intents = self.effect_intents(call_id)
+        if idempotency_key is None:
+            return intents[-1] if intents else None
+        return next((item for item in intents
+                     if item.get("idempotency_key") == idempotency_key), None)
+
+    def effect_record(self, call_id):
+        with self.connection() as db:
+            row = db.execute("SELECT * FROM effects WHERE call_id=?", (call_id,)).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            if result["result"]:
+                result["result"] = json.loads(result["result"])
+            return result
 
     def pending_outbox(self, limit=100):
         with self.connection() as db:

@@ -52,3 +52,30 @@ def test_partial_retry_counter_survives_replanner_transition():
              "past_observations": [], "retry_context": {"status": "partial", "fail_count": 2}}
     result = node_replanner(state, None)
     assert result["retry_context"]["fail_count"] == 2
+
+
+def test_backend_configuration_error_is_terminal_and_does_not_rewrite_code():
+    from legal_agent.nodes import node_execute_code
+    state = {"calculation_mode": "code", "generated_code": "result = 1",
+             "sandbox_retries": 0, "retry_context": {}}
+    result = node_execute_code(
+        state,
+        runner=lambda code, session_id=None: {
+            "calc_result": None, "error": "sandbox.backend is invalid",
+            "session_id": None, "via": "space", "error_kind": "configuration"})
+    assert result["calculation_ok"] is False
+    assert result["execution_status"] == "calculation_failed"
+    assert result["retry_context"] == {}
+    assert result["sandbox_retries"] == 3
+    assert "后端不可用" in result["calc_result"]
+
+
+def test_cleanup_node_keeps_handle_when_cleanup_is_not_proven(monkeypatch):
+    import legal_agent.nodes as nodes
+    monkeypatch.setattr(nodes, "destroy_sandbox_session", lambda session_id: False)
+    result = nodes.node_cleanup_sandbox({"sandbox_session_id": "space:r:0:sbx_x"})
+    assert result == {"sandbox_session_id": "space:r:0:sbx_x"}
+
+    monkeypatch.setattr(nodes, "destroy_sandbox_session", lambda session_id: True)
+    assert nodes.node_cleanup_sandbox(
+        {"sandbox_session_id": "space:r:0:sbx_x"}) == {"sandbox_session_id": None}

@@ -6,10 +6,20 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 import docker
 from config_loader import cfg
 
+from .errors import SandboxConfigError
+
+
 class DockerSandboxManager:
+    via = "docker"
+    one_shot = False
+    # Existing Docker calls remain ledgered as before; SPACE is the backend
+    # that declares remote mutations explicitly as side effects.
+    side_effecting = False
+
     def __init__(self, image_name=None):
         self.client = docker.from_env()
         self.image_name = image_name or cfg.get('sandbox', 'image')
@@ -95,9 +105,46 @@ class DockerSandboxManager:
                 container.remove(force=True)
 
 _default_manager = None
+_manager_lock = threading.Lock()
+
+
+def sandbox_backend(sandbox_config=None) -> str:
+    """Return the configured backend name without touching any remote service."""
+    config = cfg.get("sandbox", default={}) if sandbox_config is None else sandbox_config
+    if not isinstance(config, Mapping):
+        raise SandboxConfigError("sandbox configuration must be a mapping")
+    backend = config.get("backend", "docker")
+    if backend not in {"docker", "space"}:
+        raise SandboxConfigError(
+            f"sandbox.backend must be 'docker' or 'space', got {backend!r}")
+    return backend
+
+
+def create_sandbox_manager(sandbox_config=None):
+    """Build the configured backend.
+
+    ``docker`` is the default.  ``space`` never falls back to Docker or host
+    execution: invalid configuration is raised to the caller.
+    """
+    config = cfg.get("sandbox", default={}) if sandbox_config is None else sandbox_config
+    backend = sandbox_backend(config)
+    if backend == "docker":
+        return DockerSandboxManager()
+    from .space_manager import SpaceSandboxManager
+    return SpaceSandboxManager.from_config(config)
+
 
 def get_sandbox_manager():
     global _default_manager
     if _default_manager is None:
-        _default_manager = DockerSandboxManager()
+        with _manager_lock:
+            if _default_manager is None:
+                _default_manager = create_sandbox_manager()
     return _default_manager
+
+
+def reset_sandbox_manager() -> None:
+    """Testing helper; production code keeps one process-wide manager."""
+    global _default_manager
+    with _manager_lock:
+        _default_manager = None

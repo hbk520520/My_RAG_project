@@ -10,6 +10,24 @@ import time
 from .store import dumps
 
 current_run = ContextVar("agent_run", default=None)
+# Set only while a tool body is executing. Sandbox backends use this to persist
+# their original remote request (method/path/body/idempotency key) before they
+# send it. It is deliberately not part of graph state.
+current_effect = ContextVar("agent_effect", default=None)
+
+
+def record_effect_intent(record: dict) -> bool:
+    """Persist a side-effect intent for the currently executing tool call.
+
+    Returns False when no run context is active (offline/trusted direct use).
+    Secrets must already have been removed by the caller.
+    """
+    effect = current_effect.get()
+    if effect is None:
+        return False
+    store, run_id, epoch, token, call_id = effect
+    store.record_effect_request(run_id, epoch, token, call_id, record)
+    return True
 
 
 @dataclass
@@ -50,12 +68,22 @@ class RunContext:
         if cached:
             return result
         started = time.perf_counter()
+        marker = current_effect.set((self.store, self.run_id, self.epoch,
+                                     self.token, identity))
         try:
             result = call()
         except Exception as exc:
+            failure = {"error": f"{type(exc).__name__}: {exc}"}
+            # Preserve the original remote request so a later reconciliation
+            # can inspect the key/body even though this attempt failed.
+            intents = self.store.effect_intents(identity)
+            if intents:
+                failure["_intents"] = intents
             self.store.end_effect(self.run_id, self.epoch, self.token, identity,
-                                  {"error": f"{type(exc).__name__}: {exc}"}, status="failed")
+                                  failure, status="failed")
             raise
+        finally:
+            current_effect.reset(marker)
         self.check()
         self.store.end_effect(self.run_id, self.epoch, self.token, identity, result)
         self.store.event(self.run_id, self.epoch, self.token, "tool_completed",

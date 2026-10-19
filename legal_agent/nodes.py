@@ -328,8 +328,24 @@ def node_execute_code(state: AgentState, runner=None) -> dict:
     with resource("tool.sandbox", settings().tool_slots):
         outcome = (runner or run_code_once)(code, session_id=state.get("sandbox_session_id"))
 
+    if outcome.get("cleanup_error"):
+        logger.error("沙箱执行完成但清理未获证明: %s", outcome["cleanup_error"])
+
     if outcome["error"]:
         logger.warning(f"沙箱执行报错（via={outcome['via']}）: {outcome['error']}")
+        error_kind = outcome.get("error_kind")
+        if error_kind in ("configuration", "unavailable"):
+            # A missing/invalid backend is not a code defect. Do not rewrite
+            # the generated program in response to it.
+            max_retries = cfg.get("sandbox", "max_retries", default=3)
+            return {
+                "calc_result": f"沙箱后端不可用: {outcome['error']}",
+                "sandbox_session_id": outcome["session_id"],
+                "retry_context": {},
+                "sandbox_retries": max_retries,
+                "calculation_ok": False,
+                "execution_status": "calculation_failed",
+            }
         retries = state.get("sandbox_retries", 0) + 1
         max_retries = cfg.get("sandbox", "max_retries", default=3)
         if retries < max_retries:
@@ -387,8 +403,9 @@ def node_inject_calc_result(state: AgentState, agentic_ops=None) -> dict:
 def node_cleanup_sandbox(state: AgentState) -> dict:
     """清理沙箱资源（走 sandbox_exec 的统一入口，幂等）"""
     session_id = state.get("sandbox_session_id")
-    if session_id:
-        destroy_sandbox_session(session_id)
+    if session_id and not destroy_sandbox_session(session_id):
+        # Keep the handle so a later retry can still identify the resource.
+        return {"sandbox_session_id": session_id}
     return {"sandbox_session_id": None}
 
 

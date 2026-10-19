@@ -96,11 +96,16 @@ K8s 文件是旧链路示例，没有单机共享存储条件，不能用于部�
 程序校验算式，不证明法律适用性或输入事实真实；缺失用户事实由 Grader 请求用户补充。
 用户事实与原文证据分开保存，不送入 CHAIN 伪装为原文。
 
-`RunRequest.allow_code=true` 才在新运行时启用生成代码。代码仅在 Docker 中运行：断网、非 root、
-只读根文件系统、CPU/内存/PID 限额和输出上限；通过 Docker exec 传递，不开放 HTTP 端口。
+`RunRequest.allow_code=true` 才在新运行时启用生成代码。默认 `sandbox.backend=docker`：代码仅在 Docker 中运行，
+断网、非 root、只读根文件系统、CPU/内存/PID 限额和输出上限；通过 Docker exec 传递，不开放 HTTP 端口。
 每次执行使用新 Python 进程，变量不跨计算保留。超时或取消终止容器；Docker 不可用时明确失败。
 构建命令：`docker build -f multiple-search/legal_sandbox/Dockerfile -t legal-sandbox:v2 .`。
 `run_in_process` 仅为显式注入的可信离线测试函数，不是隔离环境，在线工具不自动调用它。
+
+可选 `sandbox.backend=space` 使用一次性 SPACE 沙箱，默认关闭；配置无效明确报错，不回退 Docker。
+SPACE 的创建/命令是非只读副作用，请求结果不确定时抛 `OutcomeUnknown`，不自动重写或重跑。
+其网络隔离由 SPACE 部署/模板保证，适配器只发送 deny-all 请求；真实部署核对前不得启用。
+配置、契约和未验证边界见 [沙箱后端](SANDBOX_BACKENDS.md)。
 
 默认预算为整次运行 300 秒、40 次模型请求、80 个节点步骤、100000 文本 token 上界。
 文本上界以输入 UTF-8 字节数加预留输出 token 计算，保守计费；不等于供应商计费 tokens，未含协议开销。

@@ -259,23 +259,33 @@ run_code_once(code: str, session_id: Optional[str] = None,
               manager: Optional[DockerSandboxManager] = None) -> Dict[str, Any]
 # → {"calc_result": str | None,   成功时的输出（优先取代码里的 result 变量）
 #    "error":       str | None,   失败时的错误信息
-#    "session_id":  str | None,   下次复用可保留变量（Docker 路径）
-#    "via":         "docker" | "local" | None}
+#    "session_id":  str | None,   Docker 可复用；托管执行清理成功后为 None，清理失败时保留
+#    "via":         "docker" | "space" | "local" | None,
+#    "error_kind":  "configuration" | "unavailable" | "timeout" |
+#                   "execution" | "output_limit" | None,  可选；失败分类
+#    "cleanup_error": str | None  可选；清理未获证明，独立于计算成功或失败}
 ```
 
-- 在线 `run_code_once` 只调用 Docker，失败返回错误，不调用主进程 exec。
+- Docker 是默认后端；在线路径不调用主进程 exec，失败也不回退到宿主机。
+- `backend=space` 时使用一次性 SPACE 沙箱；工厂配置无效时抛 `SandboxConfigError`，
+  `run_code_once` 以 `error_kind="configuration"` 返回，不自动改回 Docker；节点不会因
+  后端配置错误改写代码。
+- SPACE 的 `sandbox.execute` 以非只读副作用登记；请求结果不确定时抛 `OutcomeUnknown`，
+  不触发自动重写代码或再次执行。详见 [沙箱后端](SANDBOX_BACKENDS.md)。
 - `run_in_process` 仅由可信离线示例/测试显式注入；不是在线工具或安全边界。
-- 每次计算为独立 Python 进程；默认新运行时使用 Decimal 算式工具，可选代码执行才需要 Docker。
+- 每次计算为独立 Python 进程；默认新运行时使用 Decimal 算式工具，可选代码执行才需要沙箱。
 
 ---
 
 ## 契约 8 · 工具边界
 
-- 检索、模型请求、Decimal 和 Docker 代码执行通过共享运行上下文记录调用身份与结果。
+- 检索、模型请求、Decimal 和沙箱代码执行通过共享运行上下文记录调用身份与结果。
 - 工具输入在接口处校验；异常由运行服务分类并保存，不用错误文本冒充正常结果。
-- 既有沙箱返回字典保持兼容，包含 calc_result / error / session_id / via。
-- 只读工具可在中断后重试；外部写入工具目前未注册，中断后必须先人工核对结果。
-- 代码执行默认不开放；新运行请求显式 allow_code 才能使用 Docker 工具。
+- 既有沙箱返回字典保持兼容，包含 calc_result / error / session_id / via；SPACE 仅新增
+  `via="space"`、可选的 `error_kind` 和 `cleanup_error`。
+- 只读工具可在中断后重试；SPACE 创建沙箱/命令是非只读副作用，中断后必须先核对原始请求。
+- 代码执行默认不开放；新运行请求显式 allow_code 才能使用沙箱工具。
+- `sandbox.backend` 默认 `docker`；SPACE 未启用时不得发生远程连接或配置探测。
 
 ---
 
@@ -287,7 +297,8 @@ run_code_once(code: str, session_id: Optional[str] = None,
 |---|---|---|
 | ~~`soul.py::node_replanner` 虫洞分支~~ | ~~直连 `get_llm_client()`，**绕过** `agentic_ops` 注入接缝~~ | ✅ **P1 已拆**：改走 `agentic_ops.replan_with_wormhole()`，并删掉那个无调用方的第二份客户端工厂。`tests/harness.py::_ForbiddenLLMClient` 现在会**直接抛错**拦截任何绕过行为 |
 | `soul.py::node_generate` | 用关键词表判定 `needs_sandbox_calc` | 中文关键词枚举，P3 应改为 LLM 显式声明 |
-| 沙箱 | 可信离线测试可显式注入 local 执行器 | 在线路径只用 Docker，不能自动降级 |
+| 沙箱 | 可信离线测试可显式注入 local 执行器 | 在线路径使用配置的 Docker/SPACE 后端，不能自动降级 |
+| 沙箱 | SPACE 的 egress 隔离由部署/模板保证，代码只能发送 deny-all 请求 | 真实部署核对前不得启用；见 [沙箱后端](SANDBOX_BACKENDS.md) |
 | 双链路 | 新运行时由共享 LangGraph 编排 | 历史五阶段实现只作显式兼容排空，不获得新恢复保证 |
 
 ---

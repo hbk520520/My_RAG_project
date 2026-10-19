@@ -21,6 +21,26 @@ from .contracts import BudgetExceeded, OutcomeUnknown, ROOT, RunConflict, RunReq
 from .store import RunStore, dumps
 
 
+def sandbox_policy_identity(sandbox):
+    """Semantic sandbox policy for a run pin.
+
+    Docker-only runs keep the historical shape: the new backend/space keys are
+    omitted, so existing pins remain valid.  SPACE identity includes the
+    deployment/template semantics but never the bearer token.
+    """
+    policy = dict(sandbox or {})
+    if policy.get("backend", "docker") == "docker":
+        policy.pop("backend", None)
+        policy.pop("space", None)
+        return policy
+    space = policy.get("space")
+    if isinstance(space, dict):
+        sanitized = dict(space)
+        sanitized.pop("api_token", None)
+        policy["space"] = sanitized
+    return policy
+
+
 class AgentService:
     def __init__(self, store=None, *, engine_factory=None, operator_factory=None, workflow_factory=None):
         self.store = store or RunStore(cfg.get("runtime", "path", default=".runtime/runs.sqlite"))
@@ -56,6 +76,9 @@ class AgentService:
         pin = self.store.pin(row["run_id"], row["epoch"])
         policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox", "scheduler", "vllm")}
         policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
+        # A rotated SPACE bearer token must not change the semantic identity of
+        # an existing run.  The token is neither hashed nor stored in the pin.
+        policy["sandbox"] = sandbox_policy_identity(policy.get("sandbox"))
         config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
         import prompts
         prompt_hash = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
