@@ -359,6 +359,17 @@ class LegalDenseGraphBuilder:
         sparse = out['lexical_weights'][0]
         return {"dense": dense.astype(np.float32), "sparse": sparse}
 
+    def encode_texts(self, texts, *, batch_size=None) -> Dict[str, Any]:
+        """Opt-in batched equivalent; encode_text remains the reference path."""
+        from dataset.encoding import encode_batches
+
+        if batch_size is None:
+            batch_size = cfg.get("performance", "encoding_batch_size", default=32) if cfg else 32
+        return encode_batches(
+            texts, lambda batch: self.encoder.encode(
+                batch, return_dense=True, return_sparse=True),
+            self.dim, batch_size=batch_size)
+
     @staticmethod
     def _l2_normalize(vector: np.ndarray) -> np.ndarray:
         norm = float(np.linalg.norm(vector))
@@ -415,7 +426,7 @@ class LegalDenseGraphBuilder:
 
         两种入参：
           - embeddings 传入预计算矩阵 (N × dim)：不加载 BGE-M3，适合离线批量注入
-          - embeddings 为 None：用内部编码器逐条编码（会触发 BGE-M3 懒加载）
+          - embeddings 为 None：默认逐条编码；performance.batch_encoding 可选批量路径
 
         建边规则：connect_threshold <= 混合相似度 < label_threshold 才连边。
         等于或高于 label_threshold 视为"几乎完全冗余"，不连边而是打 similar_to 标签。
@@ -430,7 +441,11 @@ class LegalDenseGraphBuilder:
             raise ValueError("Duplicate node IDs in initial memory batch")
 
         # ---- 1. 准备向量 ----
-        if embeddings is None:
+        if embeddings is None and cfg and cfg.get("performance", "batch_encoding", default=False):
+            encoded = self.encode_texts([node["content"] for node in nodes_data])
+            embeddings = encoded["dense_vecs"]
+            sparse_list = encoded["lexical_weights"]
+        elif embeddings is None:
             logger.info(f"未提供预计算向量，使用内部编码器逐条编码 {total_nodes} 条…")
             dense_list, sparse_list = [], []
             for n in nodes_data:

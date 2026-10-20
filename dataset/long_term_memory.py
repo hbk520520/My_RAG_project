@@ -124,7 +124,7 @@ def rebuild_index(engine):
     engine.index = index
 
 
-def restore_graph(engine, payload: dict):
+def restore_graph(engine, payload: dict, *, index_cache=None, cache_namespace=None):
     import igraph as ig
     expected = {"dimension": engine.dim, "model": engine.model_name, "space_id": engine._memory_space_id}
     if payload["format"] != 1 or payload["embedding"] != expected:
@@ -147,7 +147,20 @@ def restore_graph(engine, payload: dict):
     # Build a replacement off to the side; validation failures leave the current graph intact.
     from types import SimpleNamespace
     replacement = SimpleNamespace(graph=graph, dim=engine.dim)
-    rebuild_index(replacement)
+    if index_cache is None:
+        rebuild_index(replacement)
+    else:
+        if not cache_namespace:
+            raise ValueError("Snapshot index caching requires a project namespace")
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         allow_nan=False, default=_json_value).encode("utf-8")
+        key = (cache_namespace, hashlib.sha256(raw).hexdigest())
+
+        def build():
+            rebuild_index(replacement)
+            return replacement.index
+
+        replacement.index = index_cache.get_or_build(key, build)
     tombstones = set(payload["tombstone_ids"])
     dirty = set(payload["dirty_summary_ids"])
     seeds = set(payload["pending_cluster_seeds"])

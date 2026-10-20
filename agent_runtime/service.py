@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import logging
 from pathlib import Path
 import sqlite3
 import threading
@@ -19,6 +20,9 @@ from config_loader import cfg
 from .context import RunContext, current_run
 from .contracts import BudgetExceeded, OutcomeUnknown, ROOT, RunConflict, RunRequest, RunStatus, RunStopped
 from .store import RunStore, dumps
+
+
+logger = logging.getLogger(__name__)
 
 
 def sandbox_policy_identity(sandbox):
@@ -41,6 +45,18 @@ def sandbox_policy_identity(sandbox):
     return policy
 
 
+def _execution_hashes():
+    # Performance switches do not change the durable snapshot/config format.
+    # Keep the historical policy fields so existing run pins remain readable.
+    policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox", "scheduler", "vllm")}
+    policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
+    policy["sandbox"] = sandbox_policy_identity(policy.get("sandbox"))
+    config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
+    import prompts
+    prompt_hash = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
+    return config_hash, prompt_hash
+
+
 class AgentService:
     def __init__(self, store=None, *, engine_factory=None, operator_factory=None, workflow_factory=None):
         self.store = store or RunStore(cfg.get("runtime", "path", default=".runtime/runs.sqlite"))
@@ -53,6 +69,12 @@ class AgentService:
         self.workflow_factory = workflow_factory
         self._operator_lock = threading.Lock()
         self._operator = None
+        self._index_cache = None
+        if engine_factory is None and cfg.get("performance", "snapshot_index_cache", default=False):
+            from dataset.index_cache import SnapshotIndexCache
+            self._index_cache = SnapshotIndexCache(
+                max_entries=cfg.get("performance", "snapshot_cache_entries", default=2),
+                max_bytes=cfg.get("performance", "snapshot_cache_max_bytes", default=268435456))
 
     def submit(self, request, *, transport="local"):
         request = RunRequest.model_validate(request)
@@ -71,17 +93,22 @@ class AgentService:
         return engine
 
     def _pinned_engine(self, row):
+        started = time.perf_counter()
+        try:
+            if self._index_cache is not None:
+                return self._cached_pinned_engine(row)
+            return self._reference_pinned_engine(row)
+        finally:
+            logger.info("knowledge_view run_id=%s cached_path=%s seconds=%.6f",
+                        row["run_id"], self._index_cache is not None,
+                        time.perf_counter() - started)
+
+    def _reference_pinned_engine(self, row):
+        """Original construction/restoration path, retained for comparison."""
         from dataset.long_term_memory import graph_snapshot, restore_graph
         engine = self.engine_factory(row["project_id"])
         pin = self.store.pin(row["run_id"], row["epoch"])
-        policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox", "scheduler", "vllm")}
-        policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
-        # A rotated SPACE bearer token must not change the semantic identity of
-        # an existing run.  The token is neither hashed nor stored in the pin.
-        policy["sandbox"] = sandbox_policy_identity(policy.get("sandbox"))
-        config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
-        import prompts
-        prompt_hash = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()
+        config_hash, prompt_hash = _execution_hashes()
         if pin is None:
             pin = {"snapshot": graph_snapshot(engine), "revision": engine._memory_revision,
                    "config_hash": config_hash, "prompt_hash": prompt_hash}
@@ -91,6 +118,41 @@ class AgentService:
                 raise ValueError("Run configuration or prompts changed; submit a new run")
             restore_graph(engine, pin["snapshot"])
         # Frozen run view: retrieval must not refresh into a different corpus revision.
+        engine._memory_store = None
+        return engine
+
+    def _cached_pinned_engine(self, row):
+        """Restore a private run view without first rebuilding the live corpus."""
+        from dataset.graph import LegalDenseGraphBuilder
+        from dataset.long_term_memory import MemoryStore, graph_snapshot, restore_graph
+        from .contracts import local_path
+
+        pin = self.store.pin(row["run_id"], row["epoch"])
+        config_hash, prompt_hash = _execution_hashes()
+        if pin is not None and (pin["config_hash"] != config_hash or pin["prompt_hash"] != prompt_hash):
+            raise ValueError("Run configuration or prompts changed; submit a new run")
+        engine = LegalDenseGraphBuilder.from_config(load_memory=False)
+        memory_enabled = cfg.get("long_term_memory", "enabled", default=False)
+        if memory_enabled:
+            space_id = cfg.get("long_term_memory", "embedding_space_id")
+            if not space_id or not space_id.strip():
+                raise ValueError("Long-term memory requires an explicit embedding_space_id")
+            engine._memory_space_id = space_id
+        new_pin = pin is None
+        if new_pin:
+            revision, snapshot = 0, None
+            if memory_enabled:
+                memory = MemoryStore(local_path(cfg.get("long_term_memory", "path")), row["project_id"])
+                revision, snapshot = memory.load()
+            pin = {"snapshot": snapshot if snapshot is not None else graph_snapshot(engine),
+                   "revision": revision, "config_hash": config_hash, "prompt_hash": prompt_hash}
+        restore_graph(engine, pin["snapshot"], index_cache=self._index_cache,
+                      cache_namespace=row["project_id"])
+        engine._memory_revision = pin["revision"]
+        if new_pin:
+            self.store.pin(row["run_id"], row["epoch"], pin)
+        # The cache retains only immutable bytes. Graph, metadata, document
+        # reader and deserialized FAISS index remain private to this run.
         engine._memory_store = None
         return engine
 

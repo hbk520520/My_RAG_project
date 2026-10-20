@@ -64,10 +64,26 @@ def import_tree(engine, pages: list[str], tree: dict | list, *, document_id: str
               "toc_source": tree.get("toc_source", "imported") if isinstance(tree, dict) else "imported"}
     # The complete document is committed once; model/encoding failures roll back local staging.
     with engine.memory_transaction():
+        from config_loader import cfg
+        batched = cfg.get("performance", "batch_encoding", default=False)
+        batch_size = cfg.get("performance", "encoding_batch_size", default=32)
+        encoded = None
+        offset = 0
         for page, node_id in source_ids.items():
+            vectors = {}
+            if batched:
+                # Admit pages in physical order even though encoding groups
+                # nearby lengths within each bounded batch.
+                if encoded is None or offset >= len(encoded["dense_vecs"]):
+                    encoded = engine.encode_texts(
+                        pages[page - 1:page - 1 + batch_size], batch_size=batch_size)
+                    offset = 0
+                vectors = {"dense": encoded["dense_vecs"][offset],
+                           "sparse": encoded["lexical_weights"][offset]}
+                offset += 1
             engine.add_node(node_id, pages[page - 1], "Raw", {
                 **common, "record_id": f"{document_id}:page:{page}",
-                "page_start": page, "page_end": page, "retrieval_role": "evidence"})
+                "page_start": page, "page_end": page, "retrieval_role": "evidence"}, **vectors)
         summaries = {}
         for node, parent in reversed(flattened):
             covered = {i for child in node.nodes for i in range(child.start_index, child.end_index + 1)}

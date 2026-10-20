@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # 路径引导：本文件在 dataset/ 下
@@ -45,6 +47,7 @@ from dataset.chunk import chunk_text
 SUPPORTED_SUFFIXES = (".txt", ".md", ".text")
 NODES_FILENAME = "nodes.jsonl"
 VECTORS_FILENAME = "vectors.npy"
+logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -130,6 +133,21 @@ def _default_encode_text() -> Callable[[str], Any]:
 
 def vectorize(texts: List[str],
               encoder: Optional[Callable[[str], Any]] = None) -> "np.ndarray":
+    """Select a configured path without reinterpreting injected single-text encoders."""
+    batched = False
+    if texts and encoder is None:
+        from config_loader import cfg
+        batched = cfg.get("performance", "batch_encoding", default=False)
+    started = time.perf_counter()
+    try:
+        return vectorize_batch(texts) if batched else _vectorize_reference(texts, encoder)
+    finally:
+        logger.info("corpus_encoding batched=%s texts=%d seconds=%.6f",
+                    batched, len(texts), time.perf_counter() - started)
+
+
+def _vectorize_reference(texts: List[str],
+                         encoder: Optional[Callable[[str], Any]] = None) -> "np.ndarray":
     """
     把文本列表编码成 (N, dim) float32 矩阵。
 
@@ -179,6 +197,18 @@ def vectorize(texts: List[str],
             f"向量矩阵形状 {matrix.shape} 与文本数 {len(texts)} 不匹配。"
         )
     return matrix
+
+
+def vectorize_batch(texts: List[str], *, engine=None, batch_size=None) -> "np.ndarray":
+    """Explicit batch path; injected single-text callables keep vectorize semantics."""
+    import numpy as np
+
+    if not texts:
+        return np.zeros((0, 0), dtype=np.float32)
+    if engine is None:
+        from dataset.graph import LegalDenseGraphBuilder
+        engine = LegalDenseGraphBuilder.from_config(load_memory=False)
+    return engine.encode_texts(texts, batch_size=batch_size)["dense_vecs"]
 
 
 # ===========================================================================

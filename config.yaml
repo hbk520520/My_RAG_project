@@ -45,6 +45,15 @@ embedding:
   dimension: 1024
   normalize: true
 
+# Optional first-step performance paths; false keeps the reference code active.
+# These paths have not yet received runtime/numerical/performance validation.
+performance:
+  batch_encoding: false
+  encoding_batch_size: 32
+  snapshot_index_cache: false
+  snapshot_cache_entries: 2
+  snapshot_cache_max_bytes: 268435456  # retained serialized CPU indexes only
+
 # --- 图引擎 ---
 graph:
   model_name: "BAAI/bge-m3"

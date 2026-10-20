@@ -13,6 +13,7 @@ Kafka 作业适配、Decimal 计算与可选代码执行（默认 Docker，可�
 - [Agent 运行、配置、恢复及边界](docs/AGENT_RUNTIME.md)
 - [工具策略、并行和共享资源](docs/PARALLEL_AGENT.md)
 - [沙箱后端：Docker / SPACE](docs/SANDBOX_BACKENDS.md)
+- [可选批量编码与快照索引缓存（默认关闭）](docs/PERFORMANCE_PATHS.md)
 - [接口契约](docs/CONTRACTS.md)
 - [知识长期记忆](docs/LONG_TERM_MEMORY.md)
 - [PageIndex 已实现能力](docs/PAGEINDEX_IMPLEMENTATION.md)
@@ -63,6 +64,7 @@ CLI 的提交、状态、恢复与备份命令见运行文档。
 本地工程验证使用真实 LangGraph、SQLite、HTTP TestClient 与隔离子进程；模型、Kafka 和 Docker 使用替身。
 SPACE 后端使用可注入 HTTP 传输做离线生命周期/恢复测试；**没有真实 SPACE 部署联调**。
 本次 SPACE 后续优化按要求未运行回归，历史通过记录不代表当前修改已验证。
+新增批量编码与快照索引缓存默认关闭，仅做静态检查；未运行测试、数值对照或性能基准。
 详细命令和结果见 docs/validation/agent_runtime_2026-10-18.txt 与 docs/SANDBOX_BACKENDS.md。
 没有真实模型质量、线上 Kafka/Redis、Docker 构建或 GPU 的验收结果。
 当前虚拟环境继承全局包，尚未证明干净环境可完整重装；依赖约束文件只固定有元数据的已验证直接依赖。

@@ -20,6 +20,7 @@
 | `agent_runtime/resources.py` / `models.py` | 同机资源准入、加速器模型拥有者及共享编码器 |
 | `agent_runtime/api.py` / `transport.py` / `worker.py` | HTTP 与 Kafka 适配 |
 | `dataset/` | 知识存储、文档结构、摘要与检索 |
+| `dataset/encoding.py` / `index_cache.py` | 可选批量编码与服务实例内的序列化 CPU 索引缓存；默认关闭 |
 | `causal_evidence/` | 文本因果支持验证与时间权重 |
 | `benchmark_causal/` / `model/` | 独立的评测与训练；在线执行不启动训练 |
 
@@ -28,4 +29,5 @@
 入口包装器只负责引导历史脚本，不在包内复制实现。
 
 当前运行、恢复与工具隔离契约见 [AGENT_RUNTIME.md](AGENT_RUNTIME.md)。
+可选性能路径、原实现保留方式及尚未执行的验收见 [PERFORMANCE_PATHS.md](PERFORMANCE_PATHS.md)。
 在 Windows 用 `tools/run.ps1 ci` 统一配置 D 盘临时目录和缓存，再执行现有工程检查。
