@@ -118,8 +118,6 @@ REGISTRY: list[EntryPoint] = [
                "已读证据引用校验；无网络副作用"),
     EntryPoint("dataset/document_index.py", "dataset.document_index", "ok", "no-main",
                "本地 PDF 书签/标题结构和成本诊断；导入不读取文件"),
-    EntryPoint("dataset/ingestion_priority.py", "dataset.ingestion_priority", "ok", "no-main",
-               "基于声明事实生成入库优先级；无模型、文件读取或存储副作用"),
     EntryPoint("dataset/summary_tree.py", "dataset.summary_tree", "ok", "no-main",
                "摘要依赖排序和章节正文；无外部副作用"),
     EntryPoint("dataset/document_navigation.py", "dataset.document_navigation", "ok", "no-main",

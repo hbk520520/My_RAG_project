@@ -21,7 +21,6 @@
 | `agent_runtime/api.py` / `transport.py` / `worker.py` | HTTP 与 Kafka 适配 |
 | `dataset/` | 知识存储、文档结构、摘要与检索 |
 | `dataset/encoding.py` / `index_cache.py` | 可选批量编码与服务实例内的序列化 CPU 索引缓存；默认关闭 |
-| `dataset/ingestion_priority.py` | 入库处理优先级、理由和稳定排序；独立于证据评分 |
 | `causal_evidence/` | 文本因果支持验证与时间权重 |
 | `benchmark_causal/` / `model/` | 独立的评测与训练；在线执行不启动训练 |
 

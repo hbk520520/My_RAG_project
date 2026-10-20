@@ -1,8 +1,7 @@
-"""Plan document intake, inspect project memory or import a PDF with its structure."""
+"""Inspect local project memory or import a PageIndex JSON tree plus its source PDF."""
 from __future__ import annotations
 
 import argparse
-from datetime import date
 import json
 from pathlib import Path
 import sys
@@ -14,18 +13,13 @@ if str(ROOT) not in sys.path:
 
 def main(argv=None):
     from config_loader import cfg
+    from dataset.long_term_memory import MemoryStore
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--path", type=Path, default=Path(cfg.get("long_term_memory", "path")))
     parser.add_argument("--project-id", default=cfg.get("long_term_memory", "project_id"))
     parser.add_argument("--space-id", default=cfg.get("long_term_memory", "embedding_space_id"))
     sub = parser.add_subparsers(dest="command", required=True)
-    prioritize = sub.add_parser("prioritize", help="Plan intake order without parsing documents or writing memory")
-    prioritize.add_argument("--manifest", required=True, type=Path,
-                            help="JSON list of document IDs, source files and declared intake facts")
-    prioritize.add_argument("--as-of", required=True, type=date.fromisoformat,
-                            help="Explicit YYYY-MM-DD assessment date")
-    prioritize.add_argument("--urgent-within-days", type=int, default=7)
     sub.add_parser("inspect")
     sub.add_parser("documents")
     structure = sub.add_parser("structure")
@@ -45,18 +39,8 @@ def main(argv=None):
     importer.add_argument("--stub-encoder", action="store_true",
                           help="Offline demo only; use an isolated path and --space-id stub-v1")
     args = parser.parse_args(argv)
-    if args.command == "prioritize":
-        from pydantic import TypeAdapter
-        from dataset.ingestion_priority import IngestionMaterial, plan_ingestion
-        materials = TypeAdapter(list[IngestionMaterial]).validate_json(
-            args.manifest.read_text(encoding="utf-8-sig"))
-        result = plan_ingestion(materials, as_of=args.as_of,
-                                urgent_within_days=args.urgent_within_days)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
     path = args.path if args.path.is_absolute() else ROOT / args.path
     if args.command == "inspect":
-        from dataset.long_term_memory import MemoryStore
         if not path.is_file():
             raise FileNotFoundError(path)
         revision, snapshot = MemoryStore(path, args.project_id, read_only=True).load()

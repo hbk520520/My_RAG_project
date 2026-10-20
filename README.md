@@ -14,7 +14,6 @@ Kafka 作业适配、Decimal 计算与可选代码执行（默认 Docker，可�
 - [工具策略、并行和共享资源](docs/PARALLEL_AGENT.md)
 - [沙箱后端：Docker / SPACE](docs/SANDBOX_BACKENDS.md)
 - [可选批量编码与快照索引缓存（默认关闭）](docs/PERFORMANCE_PATHS.md)
-- [资料入库优先级与排序计划](docs/INGESTION_PRIORITY.md)
 - [接口契约](docs/CONTRACTS.md)
 - [知识长期记忆](docs/LONG_TERM_MEMORY.md)
 - [PageIndex 已实现能力](docs/PAGEINDEX_IMPLEMENTATION.md)
