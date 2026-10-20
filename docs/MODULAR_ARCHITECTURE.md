@@ -21,6 +21,8 @@
 | `agent_runtime/api.py` / `transport.py` / `worker.py` | HTTP 与 Kafka 适配 |
 | `dataset/` | 知识存储、文档结构、摘要与检索 |
 | `dataset/encoding.py` / `index_cache.py` | 可选批量编码与服务实例内的序列化 CPU 索引缓存；默认关闭 |
+| `dataset/material_routing.py` / `material_rules.json` | rule-engine 资料用途与加工深度分流、流式来源报告 |
+| `dataset/pdf_intake.py` | 原文页轻量导入、核心长文目录、可选 PDF 检查和待提取边界 |
 | `causal_evidence/` | 文本因果支持验证与时间权重 |
 | `benchmark_causal/` / `model/` | 独立的评测与训练；在线执行不启动训练 |
 

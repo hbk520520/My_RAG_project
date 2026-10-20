@@ -22,3 +22,6 @@ exclude = ["tests*", "outputs*", "dataset.corpus_out*"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
+
+[tool.setuptools.package-data]
+dataset = ["material_rules.json"]

@@ -1,0 +1,12 @@
+{
+  "version": "material-routing-v1",
+  "rules": [
+    {"id": "derived_archive", "when": "kind == 'derived' or derived", "category": "derived", "path": "archive", "reason": "Derived material stays outside original evidence"},
+    {"id": "normative_deep", "when": "(kind == 'normative' or (kind == 'auto' and law_schema)) and (needs_ocr or complex_layout or (not structured and page_count > 8))", "category": "normative", "path": "deep", "reason": "Core normative document needs extraction or navigation work"},
+    {"id": "normative_light", "when": "kind == 'normative' or (kind == 'auto' and law_schema)", "category": "normative", "path": "light", "reason": "Core normative material can reuse native text and existing structure"},
+    {"id": "case_deep", "when": "kind == 'case' and (needs_ocr or complex_layout or (not structured and page_count > 8))", "category": "case", "path": "deep", "reason": "Core case document needs extraction or navigation work"},
+    {"id": "case_light", "when": "kind == 'case'", "category": "case", "path": "light", "reason": "Short readable case material needs only original-page indexing"},
+    {"id": "reference_light", "when": "kind == 'reference'", "category": "reference", "path": "light", "reason": "Reference material uses basic indexing without generated hierarchy"},
+    {"id": "unknown_deferred", "when": "true", "category": "unknown", "path": "deferred", "reason": "Insufficient declared provenance or schema; retain for classification"}
+  ]
+}

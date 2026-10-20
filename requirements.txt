@@ -18,6 +18,7 @@ redis>=5.0
 # ---- 配置与校验 ----
 pydantic>=2.5
 PyYAML>=6.0
+rule-engine==5.1.0  # Intake policy evaluation; no classification model
 
 # ---- 数值 / 检索 ----
 # 环境实测：law_rag (Python 3.10) 已装 numpy 2.2.5 + torch 2.11，可正常共存。

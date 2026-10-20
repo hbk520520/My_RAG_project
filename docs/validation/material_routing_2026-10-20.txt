@@ -1,0 +1,41 @@
+Date: 2026-10-20 (Asia/Shanghai)
+Workspace: D:\project(now)
+Base: 0c83e7b83e6687711dda32e768a4cf4e917f9249
+
+Dependency additions (no existing package upgrades):
+  .\.venv\Scripts\python.exe -m pip install --no-deps --only-binary=:all: --cache-dir outputs/pip-cache rule-engine==5.1.0 pdf-inspector==1.25.2
+  Result: installed rule-engine 5.1.0 and pdf-inspector 1.25.2.
+  Existing python-dateutil: 2.9.0.post0.
+  TEMP and TMP were set to D:\project(now)\outputs\temp.
+  No OCR runtime, OCR models or hosted calls were used.
+
+Static/configuration checks using .venv\Scripts\python.exe -:
+  ast.parse: dataset/material_routing.py, dataset/pdf_intake.py,
+    tools/long_term_memory.py, tools/audit_entrypoints.py,
+    tests/test_material_routing.py.
+  JSON parsing: dataset/material_rules.json (7 rules).
+  TOML parsing: pyproject.toml; dataset/material_rules.json listed as package data.
+  rule-engine compilation: all 7 policy expressions compiled successfully.
+  Installed pdf_inspector.detect_pdf is callable; this check opened no PDF.
+
+Actual source-data operation:
+  .\.venv\Scripts\python.exe tools/long_term_memory.py route-corpus --input benchmark_causal/data/legal_corpus.jsonl --output outputs/intake/law-routing.jsonl
+  Exit: 0.
+  Records: 1428; category normative: 1428; processing path light: 1428.
+  missing_valid_from flags: 1087. These are metadata flags, not legal validity findings.
+  Report bytes at generation: 603257; not a process-memory measurement.
+  The existing missing LLM API key warning was emitted; no LLM was called.
+  Original corpus: git diff --exit-code -- benchmark_causal/data/legal_corpus.jsonl returned 0.
+
+git diff --check: passed.
+
+Not executed under the existing request to defer tests:
+  pytest, full tools/ci.py, PDF import branch tests, real PDF detection/quality checks,
+  OCR integration, packaging build and runtime/memory performance benchmarks.
+  Added test cases are not claimed to have passed.
+
+Scope limits:
+  OCR/layout-dependent files return pending_extraction; they are not automatically imported.
+  The old import-pageindex compatibility entry remains available and is not a forced routing boundary.
+  JSONL routing reports do not automatically populate the online knowledge database.
+  The optional PDF inspector and the routed PDF import have not received functional validation.

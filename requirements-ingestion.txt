@@ -1,0 +1,3 @@
+# Optional PDF detect-only adapter. Install after the normal runtime dependencies.
+# No OCR models, PDFium or ONNX Runtime are installed by this file.
+pdf-inspector==1.25.2
