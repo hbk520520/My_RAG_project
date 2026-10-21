@@ -1,0 +1,44 @@
+范围：合成数据组件 synthetic-tasks-v2；仅离线组件验证，无实际模型 API、训练或外部工具写入。
+工作目录：D:\project(now)
+解释器：D:\project(now)\.venv\Scripts\python.exe（3.13.9），Pydantic 2.12.3。
+环境：PYTHONUTF8=1、PYTHONDONTWRITEBYTECODE=1、HF_HUB_OFFLINE=1、TRANSFORMERS_OFFLINE=1。
+
+最终定向测试：
+.\.venv\Scripts\python.exe -m pytest -q tests/test_synthetic_component.py -o cache_dir=outputs/pytest-cache --basetemp=outputs/pytest-synthetic-v2-final
+结果：退出码 0，23 项通过。
+覆盖六类任务及 OOD、前置依赖、协作角色与交接、独立分支重排、缺失信息、权限和预算、
+冲突与复述、结果独立复算、正确答案下的错误步骤／状态、可复现性、配置边界、
+候选不得自我晋升、未知引用拒绝、provider 次数上限及零隐式调用、provider 异常传播、
+失败不发布、禁止覆盖、种子分组预校验与优先级、CLI 离线种子接入。
+provider 测试使用本地函数替身，没有请求外部模型。
+
+默认离线命令：
+.\.venv\Scripts\python.exe -m model.data.synthetic --output D:\project(now)\outputs\synthetic-v2\baseline-20261021
+结果：退出码 0；79 个 verified 任务，48 个 pending 题目草稿，未生成可选轨迹文件。
+六类数量：lookup=15、composition=13、dependency=17、parallel=13、recovery=10、constraints=11。
+verified 切分：train=62、validation=3、test=1、ood=13。
+共有 48 个来源组，组变体数分布：1 次=30 组、2 次=9 组、3 次=5 组、4 次=4 组。
+所有参考轨迹已回放；provider_calls=0，training_executed=false。
+
+困难配置：outputs/synthetic-v2/stress-config-20261021.json
+{"seed":7,"groups":24,"ood_groups":6,"max_variants":4,"max_items":24,"complexity_exponent":0.1,"repetition_rate":1,"conflict_rate":1,"unresolved_conflict_rate":0.5,"pending_per_group":3,"include_trajectories":true}
+命令：
+.\.venv\Scripts\python.exe -m model.data.synthetic --config outputs/synthetic-v2/stress-config-20261021.json --output outputs/synthetic-v2/stress-20261021
+结果：退出码 0；46 个 verified、90 个 pending，另有 227 条程序候选轨迹。
+覆盖最多 24 条目标记录；复述=46、过期来源=12、较低优先级冲突=7、同级未决冲突=20。
+预期行为：completed=19、needs_evidence=20、needs_input=1、blocked=6。
+所有参考轨迹回放通过；provider_calls=0，training_executed=false。
+
+额外实际检查：
+- 使用 ast.parse 检查新增 7 个模块、测试和入口登记，共 9 个 Python 文件，通过。
+- 使用 tools.audit_entrypoints.probe_import 检查 contracts/generation/simulation/candidates/export/__main__；
+  6 个模块均成功且没有导入输出，不需要凭据、模型或服务。
+- 逐文件读取输出目录，复算 manifest 中全部 JSONL 的 SHA-256 和行数：
+  baseline：9 个文件、175 行、48 个组；stress：17 个文件、703 行、30 个组，全部匹配。
+- 同时检查当前 7 个生成模块的字节哈希与两份 manifest 的 code_sha256 一致，通过。
+- 按 group_id 和来源 ID 核对 split 隔离；检查 verified/pending 文件的验证状态一致，全部通过。
+- git diff --check 通过。
+
+未执行完整 tools/ci.py、全项目 pytest、打包构建、模型训练、训练效果对照或性能基准。
+项目未配置独立 lint／类型检查流程，本轮未新加此类依赖。
+输出目录是被忽略的本地产物，不自动上传 GitHub，不自动写入原始资料库或训练入口。

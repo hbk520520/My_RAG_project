@@ -205,6 +205,13 @@ REGISTRY: list[EntryPoint] = [
     EntryPoint("tools/ci.py", None, "n/a", "n/a", "本工具与它平级"),
 
     # ---------------- model/（训练侧，本机无 GPU）----------------
+    EntryPoint("model/data/synthetic/__main__.py", "model.data.synthetic.__main__", "ok",
+               "needs:新输出目录", "默认离线；LLM 只能由调用方显式注入，不读取凭据"),
+    EntryPoint("model/data/synthetic/contracts.py", "model.data.synthetic.contracts", "ok", "no-main"),
+    EntryPoint("model/data/synthetic/generation.py", "model.data.synthetic.generation", "ok", "no-main"),
+    EntryPoint("model/data/synthetic/simulation.py", "model.data.synthetic.simulation", "ok", "no-main"),
+    EntryPoint("model/data/synthetic/candidates.py", "model.data.synthetic.candidates", "ok", "no-main"),
+    EntryPoint("model/data/synthetic/export.py", "model.data.synthetic.export", "ok", "no-main"),
     # 这些模块导入失败是**预期**的：本机没装 unsloth / trl，也没有 GPU。
     # 登记为 needs:* 而非 ok，所以不会让 CI 变红。
     EntryPoint("model/utils/unsloth_loader.py", "model.utils.unsloth_loader",
