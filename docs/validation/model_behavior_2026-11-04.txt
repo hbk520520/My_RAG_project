@@ -1,0 +1,49 @@
+Date: 2026-11-04 (Asia/Shanghai)
+Workspace: D:\project(now)
+Scope: optional offline Heretic preparation/launch component, no online behavior changes.
+
+Final related regression:
+  .venv/Scripts/python.exe -m pytest tests/test_model_behavior.py tests/test_module_boundaries.py tests/test_parallel_agent.py -q -o addopts='' -o cache_dir=outputs/pytest-behavior-cache --basetemp=outputs/pytest-behavior-final-20261104
+  Result: 48 passed in 24.11s, exit 0.
+  Includes 17 new cases: local configuration/snapshots, goal selection, custom markers,
+  invalid input, preserved original/old output, subprocess isolation, wrong version,
+  missing export/interpreter, changed config, dependency-free import and role plug/unplug.
+  External tool tests use a fake heretic package and fake weight bytes, NOT real inference.
+  Initial 14-case run had a pytest cache permission warning; final run uses a writable cache.
+
+Existing entrypoint audit:
+  .venv/Scripts/python.exe -u tools/audit_entrypoints.py --check
+  Result: all registered import-ok entrypoints imported cleanly, exit 0.
+  model.behavior is registered; this audit was run before the final narrow OSError handler
+  change, whose import behavior is also covered by the final related regression.
+
+CLI:
+  .venv/Scripts/python.exe -m model.behavior --help
+  Result: exit 0; no ML dependencies loaded, no download/install.
+
+Syntax and packaging:
+  Parsed model/behavior.py, tests/test_model_behavior.py and tools/audit_entrypoints.py
+  using ast.parse; result: pass.
+  PIP_NO_INDEX=1; PIP_DISABLE_PIP_VERSION_CHECK=1
+  .venv/Scripts/python.exe -m pip wheel . --no-deps --no-build-isolation --wheel-dir outputs/behavior-wheel --cache-dir outputs/pip-cache
+  Result: built legal_rag_agent-0.1.0-py3-none-any.whl, exit 0.
+  SHA256: ddd8f0278eeee6dafa5f939a1decc14b280ae51ac9a0c2958ed990b98a134eeb
+  zipfile check: packaged model/behavior.py equals current source bytes.
+  Temporary files used D:\project(now)\outputs\temp.
+
+Diff:
+  git diff --check
+  Result: pass. Existing dataset/Paper(now).code-workspace and
+  dataset/project.code-workspace remain untracked and untouched.
+
+Dependency/schema evidence:
+  No Heretic installed in the project environment. Optional requirement pins 2.0.0.
+  Checked upstream v2.0.0 config.py, utils.py, main.py and modifiers/ara.py.
+  That release reads config.toml from cwd and supports local one-prompt-per-line text.
+  No code from the external repository was copied or downloaded into this project.
+
+Not executed:
+  Real Heretic settings/plugin loading, GPU optimization, actual model weight changes,
+  vLLM loading of an exported adapter, Chinese/task-quality evaluation, all-project CI,
+  standalone lint/type checks (no dedicated configured command for this component).
+  Keyword frequency and KL objectives are proxies, not evidence of task-quality gains.

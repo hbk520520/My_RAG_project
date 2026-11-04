@@ -75,6 +75,8 @@ class EntryPoint:
 # 清单：每一行都是一个人工判断，工具负责验证这个判断还成立
 # ============================================================================
 REGISTRY: list[EntryPoint] = [
+    EntryPoint("model/behavior.py", "model.behavior", "ok", "needs:local model and prompt files",
+               "可选离线 Heretic 接入；导入和准备配置不加载模型"),
     EntryPoint("legal_agent/workflow.py", "legal_agent.workflow", "ok", "no-main"),
     EntryPoint("legal_agent/llm.py", "legal_agent.llm", "ok", "no-main"),
     EntryPoint("agent_runtime/service.py", "agent_runtime.service", "ok", "no-main"),

@@ -1,0 +1,3 @@
+# Optional offline tool environment only. Not part of API/inference dependencies.
+# Installation/download requires approval; this file does not install anything.
+heretic-llm==2.0.0
