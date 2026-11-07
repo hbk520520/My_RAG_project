@@ -17,6 +17,7 @@ Kafka 作业适配、Decimal 计算与可选代码执行（默认 Docker，可�
 - [资料轻量／深加工分流与 PDF 导入边界](docs/MATERIAL_ROUTING.md)
 - [合成数据组件：离线验证与待审核候选](docs/SYNTHETIC_DATA.md)
 - [本地模型行为优化：可拔插 Heretic 组件](docs/MODEL_BEHAVIOR.md)
+- [PA-Tool：工具及参数名称对齐，无需训练](docs/TOOL_SCHEMA_ALIGNMENT.md)
 - [接口契约](docs/CONTRACTS.md)
 - [知识长期记忆](docs/LONG_TERM_MEMORY.md)
 - [PageIndex 已实现能力](docs/PAGEINDEX_IMPLEMENTATION.md)

@@ -51,6 +51,9 @@ def _execution_hashes():
     policy = {key: cfg.get(key) for key in ("graph", "embedding", "retriever", "causal_evidence", "pageindex", "agent", "sandbox", "scheduler", "vllm")}
     policy["llm"] = {key: value for key, value in cfg.get("llm").items() if key != "api_key"}
     policy["sandbox"] = sandbox_policy_identity(policy.get("sandbox"))
+    if cfg.get("tool_schema_alignment", "profiles", default={}):
+        from agent_tools.schema_alignment import profile_hashes
+        policy["tool_schema_alignment"] = profile_hashes()
     config_hash = hashlib.sha256(dumps(policy).encode()).hexdigest()
     import prompts
     prompt_hash = hashlib.sha256(Path(prompts.__file__).read_bytes()).hexdigest()

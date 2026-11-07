@@ -104,12 +104,23 @@ class AgenticNodesOperator(LegalLLMBase):
 
     def replan_with_wormhole(self, query, global_facts, fail_log, fail_count=0):
         from agent_runtime.contracts import TaskSpec
-        raw = self._role_messages("replanner", prompts.build_replanner_messages(
+        from agent_tools.schema_alignment import for_role
+        alignment = for_role("replanner")
+        schema = '{"task_queue": [{"task_desc": "...", "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "..."}]}'
+        if alignment:
+            schema = json.dumps(alignment.schema(), ensure_ascii=False)
+        messages = prompts.build_replanner_messages(
             original_query=query, global_facts=global_facts,
             retry_context={"fail_count": fail_count, "fail_log": fail_log},
-            schema_json='{"task_queue": [{"task_desc": "...", "engine": "GLOBAL_DENSE_WORMHOLE", "rationale": "..."}]}'),
+            schema_json=schema)
+        if alignment:
+            # Translate only static instructions, never case facts or failure observations.
+            messages[0]["content"] = (alignment.instructions(prompts.REPLANNER_SYSTEM)
+                                      + messages[0]["content"][len(prompts.REPLANNER_SYSTEM):])
+        raw = self._role_messages("replanner", messages,
             require_json=True, temperature=0.4)
-        tasks = json.loads(raw)["task_queue"]
+        data = json.loads(raw)
+        tasks = (alignment.decode(data) if alignment else data)["task_queue"]
         if not tasks:
             raise ValueError("Replanner returned an empty task queue")
         return [TaskSpec.model_validate({"task_id": f"replan-{i}", **task}).model_dump()

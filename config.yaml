@@ -20,6 +20,11 @@ llm:
   max_tokens_default: 2048
   max_tokens_judge: 512
 
+# Optional PA-Tool name mappings by role; empty keeps the original tool interfaces.
+# Paths are relative to this configuration file. Generate mappings before enabling.
+tool_schema_alignment:
+  profiles: {}                 # replanner: outputs/tool-schema/replanner.json
+
 # --- VLLM 自部署推理 (用自己的模型) ---
 vllm:
   base_model: "Qwen/Qwen2.5-14B-Instruct"

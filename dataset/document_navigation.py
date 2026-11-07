@@ -127,8 +127,14 @@ def retrieve(engine, query: str, vector_search, call, *, settings=None, encoding
         "Choose pages relevant to the question, read original pages before finish. Summaries are navigation only. "
         "vector_search reads the existing vector baseline, including standalone articles. "
         "Respect pagination, read_budget_exceeded and already_read. Never invent evidence. "
-        "Schema: " + dumps(Action.model_json_schema())
     )
+    from agent_tools.schema_alignment import for_role
+    alignment = for_role("navigator")
+    if alignment:
+        instructions = alignment.instructions(instructions) + (
+            "Catalog and tool results retain their original metadata field names; "
+            "copy their identifier values into the parameters defined by the schema. ")
+    instructions += "Schema: " + dumps(alignment.schema() if alignment else Action.model_json_schema())
     messages = [{"role": "system", "content": instructions}, {"role": "user", "content": dumps({
         "question": query, "catalog": initial_catalog, "budgets": settings.model_dump()})}]
     trace["prompt_content_tokens"] = 0
@@ -138,7 +144,8 @@ def retrieve(engine, query: str, vector_search, call, *, settings=None, encoding
         raw = call(messages)
         trace["model_calls"] += 1
         trace["response_content_tokens"] += tokens(raw)
-        action = Action.model_validate_json(raw)
+        action = (Action.model_validate(alignment.decode(json.loads(raw))) if alignment else
+                  Action.model_validate_json(raw))
         if action.action == "finish":
             trace["actions"].append({"action": "finish", "status": "ok"})
             trace["status"] = "complete" if hits else "empty"

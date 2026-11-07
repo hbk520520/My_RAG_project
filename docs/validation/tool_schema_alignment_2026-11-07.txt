@@ -1,0 +1,58 @@
+Date: 2026-11-07 (Asia/Shanghai)
+Workspace: D:\project(now)
+Scope: PA-Tool naming, mapping generation, Replanner/navigation model boundaries.
+
+Targeted command:
+  .venv/Scripts/python.exe -m pytest tests/test_schema_alignment.py -q -o addopts='' -o cache_dir=outputs/pytest-schema-cache --basetemp=outputs/pytest-schema-20261107
+  Result: 16 passed in 1.79s; exit 0.
+  Tests cover exact edit distance, clustered peakedness vs most-frequent selection,
+  greedy-reference ties, collision locking/exhaustion, reserved canonical fields,
+  candidate errors, sampling temperatures/counts using a callback double,
+  JSON Schema required/default/enum translation, preserved free text,
+  actual Replanner task validation and actual DocumentReader page execution,
+  canonical navigation traces, disabled compatibility, role-model identity,
+  mapping-content run fingerprints, offline CLI and explicit local-only generation.
+
+Existing full project CI command:
+  .venv/Scripts/python.exe -u tools/ci.py
+  Environment:
+    PYTHONDONTWRITEBYTECODE=1, PYTHONIOENCODING=utf-8, PYTHONUTF8=1,
+    OMP_NUM_THREADS=1,
+    TEMP=TMP=D:\project(now)\outputs\temp,
+    HF_HOME=D:\project(now)\outputs\model-cache\huggingface,
+    TORCH_HOME=D:\project(now)\outputs\model-cache\torch,
+    PYTEST_ADDOPTS=-o cache_dir=outputs/pytest-schema-cache --basetemp=outputs/pytest-schema-ci-20261107
+  CI forces HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 for its subprocesses.
+  Actual results (exit 0):
+    entrypoint imports: passed (29.8s)
+    compileall: passed (3.0s)
+    full pytest suite: passed (52.3s)
+    all seven existing offline demos: passed
+    checkpoint/cross-process resume spike: passed (8.8s)
+    final CI conclusion: all green
+
+CLI:
+  .venv/Scripts/python.exe -m model.tool_schema --help
+  Result: exit 0, no model load.
+
+Build:
+  PIP_NO_INDEX=1; PIP_DISABLE_PIP_VERSION_CHECK=1
+  .venv/Scripts/python.exe -m pip wheel . --no-deps --no-build-isolation --wheel-dir outputs/schema-wheel --cache-dir outputs/pip-cache
+  Result: built legal_rag_agent-0.1.0-py3-none-any.whl, exit 0.
+  SHA256: 335c9918ba702725b4c4e03ac8b6de919a3c7cdc169c8e4abbd7e8efc74bef87
+  Checked with zipfile that both new modules contain current source bytes.
+  git diff --check: passed; prompts.py has no diff.
+
+Evidence:
+  https://arxiv.org/html/2510.07248v3 (method section and Appendix A.1/A.3)
+  https://github.com/holi-lab/PA-Tool (project page only, no reusable algorithm package)
+  Authors: Jonggeun Lee, Woojung Song, Jongwook Han, Haesung Pyun, Yohan Jo;
+  affiliation on paper: Graduate School of Data Science, Seoul National University.
+
+Not executed:
+  No training, GPU/model downloads, real candidate sampling, quality benchmarks,
+  external API calls, or live Kafka/Redis deployment.
+  Candidate names in tests are fixtures, not evidence of model familiarity.
+  No claim of reduced real-model error rate or latency improvement.
+  Dedicated lint/type checking is not configured; existing import/compile/test/build
+  flows above were used. The implementation adds no third-party dependency.
