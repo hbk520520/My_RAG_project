@@ -9,6 +9,7 @@ Kafka 作业适配、Decimal 计算与可选代码执行（默认 Docker，可�
 
 ## 从这里开始
 
+- [从零搭建的七条主线：先看整体，再查完整功能](docs/BUILD_STORY.md)（[PDF](output/pdf/项目从零构建脉络.pdf)）
 - [全部功能清单：默认、可选、离线、历史兼容及实现边界](docs/FEATURE_CATALOG.md)
 - [模块职责](docs/MODULAR_ARCHITECTURE.md)
 - [Agent 运行、配置、恢复及边界](docs/AGENT_RUNTIME.md)
